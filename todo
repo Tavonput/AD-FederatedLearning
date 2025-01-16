@@ -1,0 +1,5 @@
+When you import from some file, the IDE popup will show all of the things that file had imported. It should only show
+the public interface.
+
+NOTES:
+Since I am averaging parameters, how does this impact the optimizer?
