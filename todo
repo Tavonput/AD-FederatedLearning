@@ -1,5 +1,7 @@
-When you import from some file, the IDE popup will show all of the things that file had imported. It should only show
-the public interface.
+Add ClientProxy and ServerProxy classes. They will hold the actor handles and some meta data about the client.
 
-NOTES:
-Since I am averaging parameters, how does this impact the optimizer?
+Refactor the proxies to take forward *args and **kwargs.
+
+Add eval to the new P2P setup
+
+Run main experiment

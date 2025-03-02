@@ -1,0 +1,130 @@
+from typing import Dict, List, Union
+from collections import defaultdict
+
+import ray
+
+import torch 
+import torch.nn as nn
+from torch.utils.data import DataLoader
+
+from . import my_logging
+from .common import NUM_GPUS, NUM_CPUS
+from .types import Parameters, Accuracy
+from .messages import EvalMessage
+
+
+AccuracyDict = Dict[int, List[Accuracy]]
+
+
+@ray.remote(num_cpus=NUM_CPUS, num_gpus=NUM_GPUS)
+class EvalActor:
+    """Eval Actor.
+
+    Performs accuracy evaluations for client models.
+    """
+    def __init__(self, eval_id: int, model: nn.Module, test_loader: DataLoader):
+        self.log = my_logging.get_logger(f"EVAL {eval_id}")
+        self.log.info(f"Initializing")
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.model = model
+        self.test_loader = test_loader
+
+        self.accuracies: AccuracyDict = defaultdict(list)
+
+        self.ready = False
+
+    def initialize(self) -> None:
+        """Set the ready state to true."""
+        self.ready = True
+
+    def stop(self) -> None:
+        """Stop."""
+        self.log.info("Stopping")
+
+    def get_accuracies(self) -> AccuracyDict:
+        """Get the accuracy record."""
+        return self.accuracies
+
+    def get_client_accuracies(self, client_id: int) -> List[Accuracy]:
+        """Get the accuracy record for a given client."""
+        return self.accuracies[client_id]
+
+    def evaluate(self, message: EvalMessage) -> None:
+        """Message: Evaluate a model."""
+        self.log.info(f"Processing eval request from {message.client_id}")
+        self._set_model(message.parameters)
+
+        self.model.eval()
+        self.model.to(self.device)
+
+        num_samples = 0
+        num_correct = 0
+
+        with torch.no_grad():
+            for inputs, labels in self.test_loader:
+                inputs = inputs.to(self.device)
+                labels = labels.to(self.device)
+
+                outputs = self.model(inputs)
+                outputs = outputs.argmax(dim=1)
+
+                num_samples += labels.size(0)
+                num_correct += (outputs == labels).sum()
+        
+        accuracy = (num_correct / num_samples * 100).item()
+        self._add_accuracy(message.client_id, accuracy, message.g_time)
+
+        self.log.debug(f"Finished eval for client {message.client_id}: {accuracy:.2f}")
+
+    def _add_accuracy(self, c_id: int, accuracy: float, g_time: float) -> None:
+        """Add an accuracy entry for a client."""
+        self.accuracies[c_id].append(Accuracy(accuracy, g_time))
+
+    def _set_model(self, parameters: Parameters) -> None:
+        """Set new model parameters."""
+        self.model.to("cpu")
+        self.model.load_state_dict(parameters)
+
+
+class EvalActorProxy:
+    """ Eval Actor Proxy.
+    
+    Wrapper for interacting with a ray EvalActor.
+    """
+    def __init__(self, eval_id: int, model: nn.Module, test_loader: DataLoader):        
+        self.eval_id = eval_id
+        self._actor = EvalActor.remote(eval_id, model, test_loader)
+
+    def initialize(self, block: bool = True) -> ray.ObjectRef:
+        """Set the ready state to true."""
+        if block:
+            return ray.get(self._actor.initialize.remote())
+        else:
+            return self._actor.initialize.remote()
+        
+    def stop(self, block: bool = True) -> ray.ObjectRef:
+        """Stop."""
+        if block:
+            return ray.get(self._actor.stop.remote())
+        else:
+            return self._actor.stop.remote()
+
+    def get_accuracies(self, block: bool = True) -> Union[AccuracyDict, ray.ObjectRef]:
+        """Get the accuracy record."""
+        if block:
+            return ray.get(self._actor.get_accuracies.remote())
+        else:
+            return self._actor.get_accuracies.remote()
+
+    def get_client_accuracies(self, client_id: int, block: bool = True) -> Union[List[Accuracy], ray.ObjectRef]:
+        """Get the accuracy record for a given client."""
+        if block:
+            return ray.get(self._actor.get_client_accuracies.remote(client_id))
+        else:
+            return self._actor.get_client_accuracies.remote(client_id)
+
+    def evaluate(self, message: EvalMessage) -> ray.ObjectRef:
+        """Message: Evaluate a model."""
+        return self._actor.evaluate.remote(message)

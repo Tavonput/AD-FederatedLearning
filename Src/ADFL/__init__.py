@@ -1,9 +1,11 @@
 from . import (
     my_logging,
     model,
-    types, 
+    types,
     messages, 
-    client, 
-    server,
-    driver,
+    eval,
+
+    Client,
+    Server,
+    Driver,
 )

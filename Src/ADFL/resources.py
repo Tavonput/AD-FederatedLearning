@@ -1,0 +1,3 @@
+NUM_CPUS = 1
+NUM_GPUS = 0.2
+

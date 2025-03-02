@@ -1,6 +1,8 @@
 import logging
 import logging.handlers
 
+GLOBAL_LEVEL = logging.INFO
+
 RESET = "\033[0m"
 COLORS = {
     'DEBUG': "\033[36m",    # Cyan
@@ -20,7 +22,7 @@ class ColoredFormatter(logging.Formatter):
 
 def get_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(GLOBAL_LEVEL)
 
     formatter = ColoredFormatter("%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
     handler = logging.StreamHandler()

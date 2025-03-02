@@ -2,22 +2,28 @@ from typing import List
 
 import ray
 
-import torch.nn as nn
-from torch.utils.data import DataLoader, Subset, random_split
-from torchvision import datasets, transforms
+from torch.utils.data import DataLoader, Subset
 
-from . import my_logging
-from .types import TrainingConfig
-from .model import get_mobile_net_v3_small
-from .server import SyncServer
-from .client import SyncClient
+from ADFL import my_logging
+from ADFL.types import TrainingConfig, FederatedResults
+from ADFL.Client import SyncClient
+from ADFL.Server import SyncServer
 
-class SyncDriver:
-    def __init__(self, timeline_path: str = None, tmp_path: str = None):
+from .common import (
+    Driver, _init_ray, _check_slowness_map, _create_datasets, _generate_model, _federated_results_to_json
+)
+
+class SyncDriver(Driver):
+    """ Synchronous Server-Client Driver.
+    
+    TODO: Explanation of how this thing works.
+    """
+    def __init__(self, timeline_path: str = None, tmp_path: str = None, results_path: str = "./results.json"):
         self.log = my_logging.get_logger("DRIVER")
 
         self.timeline_path = timeline_path
         self.tmp_path = tmp_path
+        self.results_path = results_path
 
         self.train_config: TrainingConfig = None
 
@@ -27,15 +33,12 @@ class SyncDriver:
 
     def init_backend(self) -> None:
         self.log.info("Initializing ray backend")
-
-        if self.tmp_path is not None:
-            ray.init(_temp_dir=self.tmp_path)
-        else:
-            ray.init()
+        _init_ray(self.tmp_path)
     
     def init_training(self, train_config: TrainingConfig) -> None:
         self.log.info(f"Initialing training with config: {train_config}")
         self.train_config = train_config
+        _check_slowness_map(train_config)
 
         self.dataset_splits = self._init_datasets()
         self.clients = self._init_clients()
@@ -43,7 +46,10 @@ class SyncDriver:
 
     def run(self) -> None: 
         self.log.info("Initiating training")
-        ray.get(self.server.run.remote())
+        federated_results: FederatedResults = ray.get(self.server.run.remote())
+
+        _federated_results_to_json(self.results_path, federated_results)
+        self.log.info(f"FederatedResults saved to {self.results_path}")
 
         if self.timeline_path is not None:
             ray.timeline(filename=self.timeline_path)
@@ -57,36 +63,26 @@ class SyncDriver:
 
     def _init_datasets(self) -> List[Subset]:
         self.log.info("Creating datasets")
+        dataset_split = _create_datasets(data_path="../Data", num_splits=self.train_config.num_clients)
+        self.log.info(f"Dataset size: {dataset_split.split_size}/{dataset_split.full_size}")
+        return dataset_split.sets
 
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ])
-
-        full_dataset = datasets.CIFAR10(root="../Data", train=True, transform=transform, download=True)
-        split_datasets = random_split(
-            full_dataset, [len(full_dataset) // self.train_config.num_clients] * self.train_config.num_clients
-        )
-
-        self.log.info(f"Dataset size: {len(split_datasets[0])}/{len(full_dataset)}")
-        return split_datasets
-        
     def _init_clients(self) -> List[SyncClient]:
         self.log.info(f"Initializing {self.train_config.num_clients} clients")
 
         clients = [
             SyncClient.remote(
                 client_id=i, 
-                model=_generate_model(), 
+                model=_generate_model(),
                 train_loader=DataLoader(self.dataset_splits[i], batch_size=self.train_config.batch_size, shuffle=True),
-                slowness=(i * 0.25 + 1),
+                slowness=(self.train_config.slowness_map[i] if self.train_config.slowness_map is not None else 1.0),
             ) 
             for i in range(self.train_config.num_clients)
         ]
 
         # Make sure that all of the clients are initialized
         ray.get([client.initialize.remote() for client in clients])
-        
+
         return clients
 
     def _init_server(self) -> SyncServer:
@@ -97,7 +93,3 @@ class SyncDriver:
         ray.get(server.add_clients.remote(self.clients))
 
         return server
-
-
-def _generate_model() -> nn.Module:
-    return get_mobile_net_v3_small(num_classes=10)
