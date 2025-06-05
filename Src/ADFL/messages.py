@@ -1,11 +1,19 @@
 from dataclasses import dataclass
 
-from .types import Parameters, RoundResults
+from .model import Parameters
+from .types import CompressedParameters, RoundResults
+
+
+@dataclass
+class AsyncClientTrainMessage:
+    parameters: CompressedParameters
+    epochs:     int
+    g_round:    int
 
 
 @dataclass
 class ClientUpdate:
-    parameters:    Parameters
+    parameters:    CompressedParameters
     client_id:     int
     client_round:  int
     round_results: RoundResults
@@ -14,7 +22,7 @@ class ClientUpdate:
 
 @dataclass
 class ServerUpdate:
-    parameters: Parameters
+    parameters: CompressedParameters
     server_id:  int
 
 

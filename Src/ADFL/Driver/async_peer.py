@@ -11,7 +11,7 @@ from ADFL.eval import EvalActorProxy
 from ADFL.Client import AsyncPeerClient, AsyncPeerClientV2
 
 from .common import (
-    Driver, DataSetSplit, _init_ray, _check_eval_client_map, _check_slowness_map, _create_datasets, _generate_model,
+    Driver, DataSetSplit, _init_ray, check_eval_config, _check_slowness_map, _create_datasets, _generate_model,
     _federated_results_to_json
 )
 
@@ -48,7 +48,7 @@ class AsyncPeerDriver(Driver):
         self.eval_config = eval_config
 
         _check_slowness_map(train_config)
-        _check_eval_client_map(eval_config, train_config)
+        check_eval_config(eval_config, train_config)
 
         self.dataset = self._init_datasets()
         self.evaluators = self._init_evaluators()

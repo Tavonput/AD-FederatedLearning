@@ -1,6 +1,9 @@
 import logging
 import logging.handlers
+import os
 
+
+LOG_FILE = "../log.log"
 GLOBAL_LEVEL = logging.INFO
 
 RESET = "\033[0m"
@@ -20,13 +23,26 @@ class ColoredFormatter(logging.Formatter):
         return f"{log_color}{message}{RESET}" 
 
 
+def init_logging() -> None:
+    if os.path.exists(LOG_FILE):
+        os.remove(LOG_FILE)
+
+
 def get_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(GLOBAL_LEVEL)
 
-    formatter = ColoredFormatter("%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
-    handler = logging.StreamHandler()
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+    if not logger.handlers:
+        format = "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
+
+        coloered_formatter = ColoredFormatter(format)
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(coloered_formatter)
+        logger.addHandler(console_handler)
+
+        normal_formatter = logging.Formatter(format)
+        file_handler = logging.FileHandler(LOG_FILE)
+        file_handler.setFormatter(normal_formatter)
+        logger.addHandler(file_handler)
 
     return logger

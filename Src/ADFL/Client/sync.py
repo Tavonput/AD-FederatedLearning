@@ -9,9 +9,9 @@ import ray
 
 from ADFL import my_logging
 from ADFL.resources import NUM_CPUS, NUM_GPUS
-from ADFL.types import Parameters, RoundResults
+from ADFL.types import RoundResults
 from ADFL.messages import ClientUpdate
-from ADFL.model import get_model_parameters, set_model_parameters
+from ADFL.model import Parameters, get_model_parameters, set_model_parameters
 
 from .common import LR, _train_epoch
 

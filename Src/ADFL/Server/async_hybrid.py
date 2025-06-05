@@ -1,3 +1,4 @@
+import time
 from typing import Callable, List, Dict
 
 import torch.nn as nn
@@ -5,11 +6,14 @@ import torch.nn as nn
 import ray
 
 from ADFL import my_logging
-from ADFL.types import Parameters, TrainingConfig, ClientResults
+from ADFL.types import TrainingConfig, ClientResults
 from ADFL.messages import ClientUpdate, ServerUpdate
-from ADFL.model import get_model_parameters, set_model_parameters,simple_aggregate
+from ADFL.model import Parameters, get_model_parameters, set_model_parameters,simple_aggregate
+from ADFL.compression import decompress_params
 
 from ADFL.Client import AsyncClientProxy
+
+from .common import compress_model, train_client
 
 
 @ray.remote
@@ -31,7 +35,7 @@ class AsyncHybridServer:
         self.train_config = train_config
         self.global_model = model_fn()
 
-        self.servers: List[AsyncHybridServer] = []
+        self.servers: List[AsyncHybridServer] = []  # type: ignore
         self.clients: Dict[int, AsyncClientProxy] = {}
         self.client_results: Dict[int, ClientResults] = {}
         self.finished_clients = 0
@@ -69,7 +73,7 @@ class AsyncHybridServer:
         results = []
         for c_id, client in self.clients.items():
             accuracies = client.get_accuracies(block=True)
-            self.client_results[c_id].accuracies = accuracies
+            self.client_results[c_id].accuracies = accuracies  # type: ignore
             results.append(self.client_results[c_id])
 
         return results
@@ -105,10 +109,13 @@ class AsyncHybridServer:
         """Message: Received update from client, thus aggregate."""
         self.message_log.append(f"C_{client_update.client_id}")
 
-        self.log.info("Aggregating updates from Client {client_update.client_id}")
-        self._aggregate(client_update.parameters)
+        self.log.debug(f"Decompressing parameters from Client {client_update.client_id}")
+        client_params, d_time = decompress_params(client_update.parameters)
 
-        self.log.info("Sending updates to external servers")
+        self.log.debug(f"Aggregating updates from Client {client_update.client_id}")
+        self._aggregate(client_params)
+
+        self.log.debug("Sending updates to external servers")
         self._send_external_update()
 
         # Send out the next train message
@@ -124,8 +131,11 @@ class AsyncHybridServer:
         """Message: Received update from external server, thus aggregate."""
         self.message_log.append(f"E_{server_update.server_id}")
 
-        self.log.info(f"Aggregating updates from Server {server_update.server_id}")
-        self._aggregate(server_update.parameters)
+        self.log.debug(f"Decompressing updates from Server {server_update.server_id}")
+        params, d_time = decompress_params(server_update.parameters)
+
+        self.log.debug(f"Aggregating updates from Server {server_update.server_id}")
+        self._aggregate(params)
 
 
     def _aggregate(self, parameters: Parameters) -> None:
@@ -137,21 +147,27 @@ class AsyncHybridServer:
 
     def _train_client(self, client_id: int, round: int) -> None:
         """Send a train message to a client."""
-        self.log.info(f"Sending training job to Client {client_id}: Round {round}")
-        self.clients[client_id].train(
-            parameters=get_model_parameters(self.global_model), epochs=self.train_config.num_epochs
+        self.log.debug(f"Sending training job to Client {client_id}: Round {round}")
+        _, _ = train_client(
+            client   = self.clients[client_id],
+            model    = self.global_model,
+            epochs   = self.train_config.num_epochs,
+            method   = self.train_config.compress,
+            bits     = self.train_config.quant_lvl_1
         )
-
 
     def _send_external_update(self) -> None:
         """Send current local model to all external servers."""
+        c_params, c_time = compress_model(self.global_model, self.train_config.compress, self.train_config.quant_lvl_2)
+
         update = ServerUpdate(
-            parameters=get_model_parameters(self.global_model),
-            server_id=self.server_id
+            parameters = c_params,
+            server_id  = self.server_id
         )
 
-        for server in self.servers:
-            server.external_update.remote(update)
+        start_time = time.time()
+        [server.external_update.remote(update) for server in self.servers]
+        b_time = time.time() - start_time
 
 
     def _save_client_update(self, update: ClientUpdate) -> None:

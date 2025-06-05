@@ -1,26 +1,48 @@
 import os
 import json
-from typing import List
-from dataclasses import dataclass, asdict
+from typing import List, Union, Any, Tuple, Optional
+from enum import Enum
+from dataclasses import asdict
 from itertools import chain
 from abc import ABC, abstractmethod
 
 import ray
 
 import torch.nn as nn
-from torch.utils.data import Subset, random_split, Dataset
+from torch.utils.data import random_split, Dataset
 from torchvision import datasets, transforms
+import numpy as np
 
-from ADFL.types import TrainingConfig, EvalConfig, FederatedResults
+from ADFL.types import TrainingConfig, EvalConfig, FederatedResults, TCDataset
 from ADFL.model import get_mobile_net_v3_small
+import ADFL.dataset as ds
+
+from ADFL.Strategy import Strategy, Simple, FedAsync, FedBuff, FADAS
+
+NDArrayT2 = Tuple[np.ndarray, np.ndarray]
 
 
-@dataclass
-class DataSetSplit:
-    sets: List[Subset]
-    test: Dataset
-    full_size: int
-    split_size: int
+class NumpyDataset(Dataset):
+    """Numpy Dataset.
+
+    Simple PyTorch Dataset from numpy data and labels.
+    """
+    def __init__(self, data: np.ndarray, labels: np.ndarray, transform: Optional[transforms.Compose] = None) -> None:
+        super().__init__()
+        self.data = data
+        self.labels = labels
+        self.transform = transform
+
+
+    def __len__(self):
+        return len(self.data)
+
+
+    def __getitem__(self, index):
+        data, label = self.data[index], self.labels[index]
+        if self.transform:
+            data = self.transform(data)
+        return data, label
 
 
 class Driver(ABC):
@@ -32,7 +54,7 @@ class Driver(ABC):
         pass
 
     @abstractmethod
-    def init_training(self, train_config: TrainingConfig) -> None:
+    def init_training(self, train_config: TrainingConfig, eval_config: EvalConfig) -> None:
         """Initialize the training environment."""
         pass
 
@@ -47,43 +69,58 @@ class Driver(ABC):
         pass
 
 
-def _generate_model() -> nn.Module:
+class FederatedResultsEncoder(json.JSONEncoder):
+    """Custom encoder for serializing FederatedResults."""
+    def default(self, o: Any) -> Any:
+        if isinstance(o, Enum):
+            return o.value
+        if hasattr(o, "to_json"):
+            return o.to_json()
+        if hasattr(o, "__dict__"):
+            return o.__dict__
+        return super().default(o)
+
+
+def run_driver(driver: Driver, train_config: TrainingConfig, eval_config: EvalConfig) -> None:
+    driver.init_backend()
+    driver.init_training(train_config, eval_config)
+    driver.run()
+    driver.shutdown()
+
+
+def generate_model(dataset: TCDataset) -> nn.Module:
     """Get a MobileNetV3 Small model with 10 classes."""
-    return get_mobile_net_v3_small(num_classes=10)
+    if dataset == TCDataset.CIFAR10:
+        return get_mobile_net_v3_small(num_classes=10, num_input_channels=3)
+    elif dataset == TCDataset.MNIST:
+        return get_mobile_net_v3_small(num_classes=10, num_input_channels=1)
 
 
-def _create_datasets(data_path: str, num_splits: int) -> DataSetSplit:
-    """Get a partitioned CIFAR10 dataset."""
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
-
-    full_dataset = datasets.CIFAR10(root=data_path, train=True, transform=transform, download=True)
-    split_datasets = random_split(
-        full_dataset, [len(full_dataset) // num_splits] * num_splits
-    )
-
-    test_set = datasets.CIFAR10(root=data_path, train=False, transform=transform, download=True)
-
-    return DataSetSplit(split_datasets, test_set, len(full_dataset), len(split_datasets[0]))
+def create_datasets(
+    dataset: TCDataset, data_path: str, num_splits: int, iid: bool, alpha: float = 0.1, seed: int = 0
+) -> ds.DatasetSplit:
+    """Get a partitioned dataset."""
+    return ds.create_datasets(dataset, data_path, num_splits, iid, alpha, seed)
 
 
-def _init_ray(tmp_path: str = None) -> None:
+def init_ray(tmp_path: Union[str, None] = None) -> None:
     """Initialize ray with a given tmp path."""
+    if ray.is_initialized():
+        ray.shutdown()
+
     if tmp_path is not None:
         ray.init(_temp_dir=tmp_path)
     else:
         ray.init()
 
 
-def _check_slowness_map(train_config: TrainingConfig) -> None:
+def check_slowness_map(train_config: TrainingConfig) -> None:
     """Asserts that the size of the slowness map is correct."""
     if train_config.slowness_map is not None:
         assert train_config.num_clients == len(train_config.slowness_map)
 
 
-def _check_sc_map(train_config: TrainingConfig) -> None:
+def check_sc_map(train_config: TrainingConfig) -> None:
     """Asserts that the server-client map layout is correct."""
     if train_config.sc_map is not None:
         assert train_config.num_servers == len(train_config.sc_map)
@@ -92,8 +129,12 @@ def _check_sc_map(train_config: TrainingConfig) -> None:
         assert train_config.num_clients == len(all_clients)
 
 
-def _check_eval_client_map(eval_config: EvalConfig, train_config: TrainingConfig) -> None:
+def check_eval_config(eval_config: EvalConfig, train_config: TrainingConfig) -> None:
     """Asserts that the client map layout is correct."""
+    if eval_config.central == True:
+        assert eval_config.num_actors == 1
+        return
+
     if eval_config.num_actors == 0:
         return
 
@@ -104,16 +145,31 @@ def _check_eval_client_map(eval_config: EvalConfig, train_config: TrainingConfig
         assert len(all_clients) == train_config.num_clients
 
 
+def check_strategy(system_sync: bool, strategy: Strategy) -> None:
+    """Check if the strategy is compatible with the server."""
+    if isinstance(strategy, Simple):
+        assert system_sync == strategy.sync
+
+    elif (
+        isinstance(strategy, FedAsync) or
+        isinstance(strategy, FedBuff)  or
+        isinstance(strategy, FADAS)
+    ):
+        assert system_sync is False
+    else:
+        assert False, "Encountered invalid Strategy or Strategy is not in the check list"
+
+
+def federated_results_to_json(path: str, results: FederatedResults) -> None:
+    """Create a json file from a RoundResults."""
+    _check_directory(path)
+
+    with open(path, "w") as file:
+        json.dump(asdict(results), file, indent=4, cls=FederatedResultsEncoder)
+
+
 def _check_directory(path: str) -> None:
     """Create the directory if it does not exist."""
     dir = os.path.dirname(path)
     if not os.path.exists(dir):
         os.makedirs(dir)
-
-
-def _federated_results_to_json(path: str, results: FederatedResults) -> None:
-    """Create a json file from a RoundResults."""
-    _check_directory(path)
-    with open(path, "w") as file:
-        json.dump(asdict(results), file, indent=4)
-

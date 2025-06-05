@@ -1,7 +1,8 @@
-Add ClientProxy and ServerProxy classes. They will hold the actor handles and some meta data about the client.
+Abstract the async servers by making one async server class, then create an AsyncTrainer and a TraditionalTrainer.
 
-Refactor the proxies to take forward *args and **kwargs.
+Track the model parameter distribution and delta distribution over time. My hypothesis is that the delta distribution
+will be smaller and more closely compacted around zero. Also maybe track the quantization error (this will hinder 
+performance as need to do some additional communication and computation, but this will be just a study on error, not
+performance)?
 
-Add eval to the new P2P setup
-
-Run main experiment
+Better visuals for accuracy and loss.

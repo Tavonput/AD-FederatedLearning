@@ -1,18 +1,15 @@
 import os
+
+from numpy.random import dirichlet
 os.environ["RAY_DEDUP_LOGS"] = "0"
 os.environ["RAY_PROFILING_MODE"] = "1"
 
 from typing import List, Tuple
 
-from ADFL.types import TrainingConfig, EvalConfig
-from ADFL.Driver import (
-    Driver, 
-    SyncDriver, 
-    AsyncDriver, 
-    AsyncPeerDriver,
-    AsyncPeerDriverV2,
-    AsyncHybridDriver,
-)
+from ADFL.my_logging import init_logging
+from ADFL.types import TCDataset, TrainingConfig, EvalConfig
+from ADFL.Driver import *
+from ADFL.Strategy import FADAS, FedBuff
 
 
 def clients_10() -> Tuple[List, List[List]]:
@@ -42,6 +39,22 @@ def clients_8() -> Tuple[List, List[List]]:
     return slowness_map, sc_map
 
 
+def clients_2() -> Tuple[List, List[List]]:
+    slowness_map = [
+        1.00, 1.00
+    ]
+    sc_map = [
+        [0], [1]
+    ]
+    return slowness_map, sc_map
+
+
+def clients_1() -> Tuple[List, List[List]]:
+    slowness_map = [1.00]
+    sc_map = [[0]]
+    return slowness_map, sc_map
+
+
 def clients_8_special_case() -> List[List]:
     return [
         [0], [1], [2], [3], [4], [5], [6], [7]
@@ -56,55 +69,49 @@ def run(driver: Driver, train_config: TrainingConfig, eval_config: EvalConfig) -
 
 
 def main() -> None:
-    slowness_map, sc_map = clients_8()
+    init_logging()
 
     eval_config = EvalConfig(
         method     = "round",
-        threshold  = 1,
-        num_actors = 2,
+        central    = True,
+        threshold  = 3,
+        num_actors = 1,
         client_map = [
             [0, 1, 2, 3],
             [4, 5, 6, 7],
         ]
     )
 
-    sc_map = clients_8_special_case()
-
-    train_config = TrainingConfig(
-        num_rounds   = 10000,
-        num_epochs   = 5,
-        num_clients  = 8,
-        num_servers  = 8,
-        batch_size   = 512,
-        max_rounds   = 10000,
-        timeout      = 60,
-        slowness_map = slowness_map,
-        sc_map       = sc_map,
-    )
+    slowness_map, _ = clients_8()
 
     results_base_path = "../Output/Results/Test"
     tmp_path = "/data/tavonputl/tmp/ray"
-    timeline_path = None # "../Output/Timelines/async_hybrid_test.json" 
+    timeline_path = "../Output/Timelines/test.json"
 
-    # results_path = "../Output/Results/Paper/traditional_sc.json"
-    # driver = AsyncDriver(timeline_path, tmp_path, results_path, traditional=True)
-    # run(driver, train_config, eval_config)
-    # del driver
+    train_config = TrainingConfig(
+        strategy     = FedBuff(5, 1, apply_staleness=True),
+        dataset      = TCDataset.CIFAR10,
+        iid          = False,
+        dirichlet_a  = 0.1,
+        num_rounds   = 100000,
+        num_epochs   = 1,
+        num_clients  = 8,
+        num_servers  = 1,
+        batch_size   = 512,
+        max_rounds   = 1000000,  # Not used anymore (needs to be refactored out)
+        timeout      = 600,
+        compress     = "byte",
+        quant_lvl_1  = 8,
+        quant_lvl_2  = 4,
+        slowness_map = slowness_map,
+        sc_map       = None,
+    )
 
-    results_path = f"{results_base_path}/async_sc.json"
+    results_path = f"{results_base_path}/test.json"
     driver = AsyncDriver(timeline_path, tmp_path, results_path, traditional=False)
     run(driver, train_config, eval_config)
     del driver
 
-    # results_path = f"../Output/Results/Paper/async_peer.json"
-    # driver = AsyncPeerDriverV2(timeline_path, tmp_path, results_path)
-    # run(driver, train_config, eval_config)
-    # del driver
-
-    # results_path = f"{results_base_path}/async_peer_special.json"
-    # driver = AsyncHybridDriver(timeline_path, tmp_path, results_path)    
-    # run(driver, train_config, eval_config)
-    # del driver
 
 if __name__ == "__main__":
     main()

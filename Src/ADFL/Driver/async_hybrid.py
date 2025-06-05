@@ -14,7 +14,7 @@ from ADFL.Server import AsyncHybridServer
 
 from .common import (
     Driver, DataSetSplit, 
-    _init_ray, _check_eval_client_map, _check_slowness_map, _create_datasets, _generate_model, _check_sc_map,
+    _init_ray, check_eval_config, _check_slowness_map, _create_datasets, _generate_model, _check_sc_map,
     _federated_results_to_json
 )
 
@@ -41,11 +41,13 @@ class AsyncHybridDriver(Driver):
 
         self.server_client_pairings: List[List[int]] = []
 
+
     def init_backend(self) -> None:
         """Initialize the backend."""
         self.log.info("Initializing ray backend")
         _init_ray(self.tmp_path)
-    
+
+
     def init_training(self, train_config: TrainingConfig, eval_config: EvalConfig) -> None:
         """Initialize the training setup."""
         self.log.info(f"Initialing training with config: {train_config}")
@@ -55,8 +57,8 @@ class AsyncHybridDriver(Driver):
 
         _check_slowness_map(train_config)
         _check_sc_map(train_config)
-        _check_eval_client_map(eval_config, train_config)
-        
+        check_eval_config(eval_config, train_config)
+
         self.server_client_pairings = self._get_server_client_pairings()
 
         self.dataset = self._init_datasets()
@@ -68,11 +70,12 @@ class AsyncHybridDriver(Driver):
 
         ray.get([server.log_node_setup.remote() for server in self.servers])
 
+
     def run(self) -> None: 
         """Run federated learning."""
         self.log.info("Initiating training")
         start_time = time.time()
-        
+
         [server.run.remote() for server in self.servers]
         time.sleep(self.train_config.timeout)
 
@@ -91,11 +94,13 @@ class AsyncHybridDriver(Driver):
             self.log.info(f"Timeline saved to {self.timeline_path}")
 
         self.log.info("Training complete")
-    
+
+
     def shutdown(self) -> None:
         """Shutdown the driver."""
         self.log.info("Shutting down driver")
         ray.shutdown()
+
 
     def _init_datasets(self) -> DataSetSplit:
         """Create the datasets."""
@@ -103,6 +108,7 @@ class AsyncHybridDriver(Driver):
         dataset_split = _create_datasets(data_path="../Data", num_splits=self.train_config.num_clients)
         self.log.info(f"Dataset size: {dataset_split.split_size}/{dataset_split.full_size}")
         return dataset_split
+
 
     def _init_evaluators(self) -> List[EvalActorProxy]:
         """Create and initialize the evaluators."""
@@ -120,6 +126,7 @@ class AsyncHybridDriver(Driver):
 
         return evaluators
 
+
     def _init_clients(self) -> List[AsyncClientProxy]:
         """Create and initialize the clients."""
         self.log.info(f"Initializing {self.train_config.num_clients} clients")
@@ -134,6 +141,7 @@ class AsyncHybridDriver(Driver):
                     test_loader  = self._create_eval_loader() if self.eval_config.num_actors == 0 else None,
                     slowness     = (self.train_config.slowness_map[i] if self.train_config.slowness_map is not None \
                                     else 1.0),
+                    train_config = self.train_config,
                     eval_config  = self.eval_config, 
                     server       = self._get_server_for_client(i),
                     evaluator    = self._get_evaluator_for_client(i),
@@ -142,9 +150,10 @@ class AsyncHybridDriver(Driver):
 
         # Make sure that all of the clients are initialized
         ray.get([client.initialize(block=False) for client in clients])
-        
+
         return clients
-    
+
+
     def _init_servers(self) -> List[AsyncHybridServer]: 
         """Create and initialize the servers."""
         self.log.info("Initializing servers")
@@ -168,13 +177,16 @@ class AsyncHybridDriver(Driver):
 
         return servers
 
+
     def _create_train_loader(self, i: int) -> DataLoader:
         """Get a train DataLoader."""
         return DataLoader(self.dataset.sets[i], batch_size=self.train_config.batch_size, shuffle=True)
-    
+
+
     def _create_eval_loader(self) -> DataLoader:
         """Get a test DataLoader."""
         return DataLoader(self.dataset.test, batch_size=self.train_config.batch_size, shuffle=False)
+
 
     def _get_evaluator_for_client(self, client_id: int) -> EvalActorProxy:
         """Get the corresponding evaluator for a client."""
@@ -188,6 +200,7 @@ class AsyncHybridDriver(Driver):
                 if client_id == c_id:
                     return self.evaluators[e_id]
 
+
     def _get_server_for_client(self, client_id: int) -> AsyncHybridServer:
         """Get the corresponding server for a client.
         
@@ -200,6 +213,7 @@ class AsyncHybridDriver(Driver):
                 if client_id == c_id:
                     return self.servers[s_id]
             
+
     def _get_server_client_pairings(self) -> List[List[int]]:
         """Get the server-client pairings.
         
@@ -221,11 +235,13 @@ class AsyncHybridDriver(Driver):
 
         return pairings
 
+
     def _add_clients_to_servers(self) -> None:
         """Add the clients to the servers."""
         for s_id, server in enumerate(self.servers):
             clients_to_add = [self.clients[c_id] for c_id in self.server_client_pairings[s_id]]
             ray.get(server.add_clients.remote(clients_to_add))
+
 
     def _build_and_save_federated_results(self, client_results: List[List[ClientResults]], start_time: float) -> None:
         """Build and save the FederatedResults from ClientResults."""

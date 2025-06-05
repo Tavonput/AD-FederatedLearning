@@ -6,16 +6,17 @@ from torch.utils.data import DataLoader
 from torch.optim.optimizer import Optimizer
 
 from ADFL.types import TrainResults
+from ADFL.model import Parameters
 
 
 LR = 0.001
 
 
 def _train_epoch(
-    model: nn.Module, 
-    optimizer: Optimizer, 
-    criterion: nn.Module, 
-    dataloader: DataLoader, 
+    model: nn.Module,
+    optimizer: Optimizer,
+    criterion: nn.Module,
+    dataloader: DataLoader,
     device: str,
     slowness: float,
     save_running_loss: bool = False
@@ -23,11 +24,11 @@ def _train_epoch(
     """Train a model for one epoch with a given slowness."""
     model.to(device)
     model.train()
-    
+
     results = TrainResults()
     start_time = time.time()
     results.g_start_time = start_time
-    
+
     correct, total = 0, 0
 
     for inputs, labels in dataloader:
@@ -82,8 +83,20 @@ def _evaluate(
 
             num_samples += labels.size(0)
             num_correct += (outputs == labels).sum()
-    
-    return (num_correct / num_samples * 100).item()
+
+    return (num_correct / num_samples * 100).item()  # type: ignore
+
+
+def diff_parameters(params_a: Parameters, params_b: Parameters) -> Parameters:
+    assert set(params_a.keys()) == set(params_b.keys())
+
+    diff: Parameters = {}
+    with torch.no_grad():
+        for key in params_a:
+            diff[key] = params_b[key] - params_a[key]
+
+    return diff
+
 
 # Just stuff for type hinting I guess
 class AsyncServer:

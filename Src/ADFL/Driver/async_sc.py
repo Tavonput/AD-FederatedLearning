@@ -3,20 +3,26 @@ from typing import List, Union
 
 import ray
 
+import torch
 from torch.utils.data import DataLoader
 
 from ADFL import my_logging
-from ADFL.types import TrainingConfig, FederatedResults, ClientResults, EvalConfig
+from ADFL.types import TrainingConfig, FederatedResults, ClientResults, EvalConfig, Accuracy
+from ADFL.model import Parameters
 from ADFL.eval import EvalActorProxy
+from ADFL.flag import RemoteFlag
+from ADFL.dataset import DatasetSplit
 from ADFL.Client import AsyncClientProxy
 from ADFL.Server import AsyncServer, TraditionalServer
 
 from .common import (
-    Driver, DataSetSplit, _init_ray, _check_slowness_map, _check_eval_client_map, _create_datasets, _generate_model,
-    _federated_results_to_json
+    Driver, check_strategy, init_ray, check_slowness_map, check_eval_config, create_datasets, generate_model,
+    federated_results_to_json
 )
 
 AsyncServerU = Union[AsyncServer, TraditionalServer]
+
+POLL_INT = 1
 
 
 class AsyncDriver(Driver):
@@ -26,8 +32,8 @@ class AsyncDriver(Driver):
     """
     def __init__(
         self, 
-        timeline_path: str = None, 
-        tmp_path: str = None, 
+        timeline_path: str = None,  # type: ignore
+        tmp_path: str = None,  # type: ignore
         results_path: str = "./results.json", 
         traditional: bool = False
     ):
@@ -38,18 +44,21 @@ class AsyncDriver(Driver):
         self.results_path = results_path
         self.use_traditional = traditional
 
-        self.train_config: TrainingConfig = None
-        self.eval_config: EvalConfig = None
+        self.train_config: TrainingConfig = None  # type: ignore
+        self.eval_config: EvalConfig = None  # type: ignore
 
-        self.server: AsyncServerU = None # type: ignore
+        self.server: AsyncServerU = None  # type: ignore
         self.clients: List[AsyncClientProxy] = []
         self.evaluators: List[EvalActorProxy] = []
 
-        self.dataset: DataSetSplit = None
+        self.dataset: DatasetSplit = None  # type: ignore
+
+        self.stop_flag: RemoteFlag = None  # type: ignore
 
     def init_backend(self) -> None:
         self.log.info("Initializing ray backend")
-        _init_ray(self.tmp_path)
+        init_ray(self.tmp_path)
+
 
     def init_training(self, train_config: TrainingConfig, eval_config: EvalConfig) -> None:
         self.log.info("Initialing training")
@@ -59,29 +68,45 @@ class AsyncDriver(Driver):
         self.train_config = train_config
         self.eval_config = eval_config
 
-        _check_slowness_map(train_config)
-        _check_eval_client_map(eval_config, train_config)
+        check_slowness_map(train_config)
+        check_eval_config(eval_config, train_config)
+
+        assert train_config.strategy is not None
+        check_strategy(self.use_traditional, train_config.strategy)
+
+        self.log.info("Initializing remote flag")
+        self.stop_flag = RemoteFlag()
 
         self.dataset = self._init_datasets()
         self.evaluators = self._init_evaluators()
         self.server = self._init_server()
         self.clients = self._init_clients()
 
+        self._check_client_models()
+
         ray.get(self.server.add_clients.remote(self.clients))
 
-    def run(self) -> None: 
+
+    def run(self) -> None:
         self.log.info("Initiating training")
 
         start_time = time.time()
         self.server.run.remote()
 
-        time.sleep(self.train_config.timeout)
+        server_finished = self.stop_flag.poll(self.train_config.timeout, POLL_INT)
+        if server_finished:
+            self.log.info("Server has finished all jobs")
+        else:
+            self.log.info("Timeout reached. Stopping server")
+            ray.get(self.server.stop.remote())
 
-        ray.get(self.server.stop.remote())
+        self.log.info("Stopping evaluators")
         [e.stop(block=True) for e in self.evaluators]
 
+        server_accuracies = self._get_server_accuracies()
         client_results: List[ClientResults] = ray.get(self.server.get_client_results.remote())
-        self._build_and_save_federated_results(client_results, start_time)
+        self._build_and_savefederated_results(client_results, server_accuracies, start_time)
+
 
         if self.timeline_path is not None:
             ray.timeline(filename=self.timeline_path)
@@ -89,49 +114,76 @@ class AsyncDriver(Driver):
 
         self.log.info("Training complete")
 
+
     def shutdown(self) -> None:
         self.log.info("Shutting down driver")
         ray.shutdown()
 
-    def _init_datasets(self) -> DataSetSplit:
+
+    def _init_datasets(self) -> DatasetSplit:
         self.log.info("Creating datasets")
-        dataset_split = _create_datasets(data_path="../Data", num_splits=self.train_config.num_clients)
+        dataset_split = create_datasets(
+            dataset    = self.train_config.dataset,
+            data_path  = "../Data",
+            num_splits = self.train_config.num_clients,
+            iid        = self.train_config.iid,
+            alpha      = self.train_config.dirichlet_a
+        )
         self.log.info(f"Dataset size: {dataset_split.split_size}/{dataset_split.full_size}")
         return dataset_split
+
 
     def _init_clients(self) -> List[AsyncClientProxy]:
         self.log.info(f"Initializing {self.train_config.num_clients} clients")
 
         clients = [
             AsyncClientProxy(
-                client_id    = i, 
-                model        = _generate_model(), 
+                client_id    = i,
                 train_loader = self._create_train_loader(i),
-                test_loader  = self._create_eval_loader() if self.eval_config.num_actors == 0 else None,
+                test_loader  = self._create_eval_loader() if self.eval_config.num_actors == 0 else None,  # type: ignore
                 slowness     = (self.train_config.slowness_map[i] if self.train_config.slowness_map is not None \
                                 else 1.0),
+                train_config = self.train_config,
                 eval_config  = self.eval_config,
                 server       = self.server,
-                evaluator    = self._get_evaluator_for_client(i)
+                evaluator    = self._get_evaluator_for_client(i)  # type: ignore
             )
             for i in range(self.train_config.num_clients)
         ]
 
         # Make sure that all of the clients are initialized
-        [client.initialize() for client in clients]
+        init_params: Parameters = ray.get(self.server.get_model.remote())
+        for client in clients:
+            client.init_model(lambda: generate_model(self.train_config.dataset), init_params)
 
         return clients
+
 
     def _init_server(self) -> AsyncServerU: # type: ignore
         self.log.info("Initializing server")
 
-        if self.use_traditional:
-            server = TraditionalServer.remote(model_fn=_generate_model, train_config=self.train_config)
-        else:
-            server = AsyncServer.remote(model_fn=_generate_model, train_config=self.train_config)
-        ray.get(server.initialize.remote())
+        evaluator = self.evaluators[0] if self.eval_config.central else None
 
+        if self.use_traditional:
+            server = TraditionalServer.remote(
+                lambda: generate_model(self.train_config.dataset),
+                self.train_config,
+                self.eval_config,
+                evaluator,
+                self.stop_flag,
+            )
+        else:
+            server = AsyncServer.remote(
+                lambda: generate_model(self.train_config.dataset),
+                self.train_config,
+                self.eval_config,
+                evaluator,
+                self.stop_flag,
+            )
+
+        ray.get(server.initialize.remote())  # type: ignore
         return server
+
 
     def _init_evaluators(self) -> List[EvalActorProxy]:
         self.log.info(f"Initializing {self.eval_config.num_actors} evaluators")
@@ -139,7 +191,7 @@ class AsyncDriver(Driver):
         evaluators = [
             EvalActorProxy(
                 eval_id=i,
-                model=_generate_model(),
+                model=generate_model(self.train_config.dataset),
                 test_loader=self._create_eval_loader(),
             )
             for i in range(self.eval_config.num_actors)
@@ -148,17 +200,20 @@ class AsyncDriver(Driver):
         [evaluator.initialize(block=True) for evaluator in evaluators]
         return evaluators
 
+
     def _create_train_loader(self, i: int) -> DataLoader:
         """Get a train DataLoader."""
         return DataLoader(self.dataset.sets[i], batch_size=self.train_config.batch_size, shuffle=True)
+
 
     def _create_eval_loader(self) -> DataLoader:
         """Get a test DataLoader."""
         return DataLoader(self.dataset.test, batch_size=self.train_config.batch_size, shuffle=False)
 
-    def _get_evaluator_for_client(self, client_id: int) -> EvalActorProxy:
+
+    def _get_evaluator_for_client(self, client_id: int) -> Union[EvalActorProxy, None]:
         """Get the corresponding evaluator for a client."""
-        if self.eval_config.num_actors == 0:
+        if self.eval_config.num_actors == 0 or self.eval_config.central == True:
             return None
 
         assert self.eval_config.client_map is not None
@@ -168,7 +223,10 @@ class AsyncDriver(Driver):
                 if client_id == c_id:
                     return self.evaluators[e_id]
 
-    def _build_and_save_federated_results(self, client_results: List[ClientResults], start_time: float) -> None:
+
+    def _build_and_savefederated_results(
+            self, client_results: List[ClientResults],server_accuracies: List[Accuracy], start_time: float
+    ) -> None:
         """Build and save a FederatedResults."""
         federated_results = FederatedResults(
             paradigm       = ("TraditionalServerClient" if self.use_traditional else "AsyncServerClient"),
@@ -176,8 +234,27 @@ class AsyncDriver(Driver):
             eval_config    = self.eval_config,
             g_start_time   = start_time,
             client_results = client_results,
+            c_accuracies   = server_accuracies,
         )
 
-        _federated_results_to_json(self.results_path, federated_results)
-        self.log.info(f"FederatedResults saved to {self.results_path}")        
+        federated_results_to_json(self.results_path, federated_results)
+        self.log.info(f"FederatedResults saved to {self.results_path}")
 
+
+    def _get_server_accuracies(self) -> List[Accuracy]:
+        """Get the server accuracies if possible."""
+        if self.eval_config.central == True:
+            return ray.get(self.server.get_accuracies.remote())
+        return []
+
+
+    def _check_client_models(self) -> None:
+        """Check if all clients have the same models."""
+        all_params: List[Parameters] = [client.get_model() for client in self.clients]  # type: ignore
+        base = all_params[0]
+
+        for other in all_params[1:]:
+            assert base.keys() == other.keys()
+
+            for key in base:
+                assert torch.equal(base[key], other[key])
