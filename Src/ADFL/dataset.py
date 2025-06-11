@@ -59,6 +59,9 @@ def create_datasets(
         full_dataset = datasets.MNIST(root=data_path, train=True, transform=transform, download=True)
         test_set = datasets.MNIST(root=data_path, train=False, transform=transform, download=True)
 
+    else:
+        assert False, "Only CIFAR10 and MNIST are supported"
+
     if iid:
         split_datasets = _get_iid_splits(full_dataset, num_splits)
     else:
@@ -78,7 +81,7 @@ def _get_iid_splits(dataset: Dataset, num_splits: int) -> List[Dataset]:
 def _get_noniid_splits(
     dataset: Dataset, num_splits: int, alpha: float, seed: int, transform: Optional[transforms.Compose]
 ) -> List[Dataset]:
-    """ Generate Non-IID dataset partitions based on a Dirichlet distribution.
+    """Generate Non-IID dataset partitions based on a Dirichlet distribution.
 
     Reference paper: https://arxiv.org/abs/1909.06335
     Reference implementation: https://github.com/adap/flower/tree/main/baselines/fedavgm

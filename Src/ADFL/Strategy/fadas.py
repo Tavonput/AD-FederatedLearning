@@ -101,7 +101,7 @@ class FADAS(Strategy):
             denom = (self.v_hat[k].sqrt() / math.sqrt(bias_correction_2)).add_(self.eps)
             params_prime[k] = torch.addcdiv(g_params[k], self.m[k], denom, value=step_size)
 
-        print(f"MSE={parameter_mse(g_params, params_prime)}")
+        # print(f"MSE={parameter_mse(g_params, params_prime)}")
 
         return params_prime
 

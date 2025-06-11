@@ -74,7 +74,7 @@ def main() -> None:
     eval_config = EvalConfig(
         method     = "round",
         central    = True,
-        threshold  = 3,
+        threshold  = 20,
         num_actors = 1,
         client_map = [
             [0, 1, 2, 3],
@@ -82,29 +82,28 @@ def main() -> None:
         ]
     )
 
-    slowness_map, _ = clients_8()
-
     results_base_path = "../Output/Results/Test"
     tmp_path = "/data/tavonputl/tmp/ray"
     timeline_path = "../Output/Timelines/test.json"
 
     train_config = TrainingConfig(
-        strategy     = FedBuff(5, 1, apply_staleness=True),
-        dataset      = TCDataset.CIFAR10,
-        iid          = False,
-        dirichlet_a  = 0.1,
-        num_rounds   = 100000,
-        num_epochs   = 1,
-        num_clients  = 8,
-        num_servers  = 1,
-        batch_size   = 512,
-        max_rounds   = 1000000,  # Not used anymore (needs to be refactored out)
-        timeout      = 600,
-        compress     = "byte",
-        quant_lvl_1  = 8,
-        quant_lvl_2  = 4,
-        slowness_map = slowness_map,
-        sc_map       = None,
+        strategy       = FedBuff(1, 1, apply_staleness=True),
+        dataset        = TCDataset.CIFAR10,
+        iid            = False,
+        dirichlet_a    = 0.1,
+        num_rounds     = 100000,
+        num_epochs     = 1,
+        num_clients    = 8,
+        num_servers    = 1,
+        batch_size     = 512,
+        max_rounds     = 1000000,  # Not used anymore (needs to be refactored out)
+        timeout        = 600,
+        compress       = "byte",
+        quant_lvl_1    = 8,
+        quant_lvl_2    = 4,
+        slowness_map   = None,
+        sc_map         = None,
+        slowness_sigma = 1,
     )
 
     results_path = f"{results_base_path}/test.json"

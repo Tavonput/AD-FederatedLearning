@@ -1,6 +1,6 @@
 import os
 import json
-from typing import List, Union, Any, Tuple, Optional
+from typing import Union, Any, Tuple, Optional, List
 from enum import Enum
 from dataclasses import asdict
 from itertools import chain
@@ -9,12 +9,13 @@ from abc import ABC, abstractmethod
 import ray
 
 import torch.nn as nn
-from torch.utils.data import random_split, Dataset
-from torchvision import datasets, transforms
+from torch.utils.data import Dataset
+from torchvision import transforms
 import numpy as np
 
 from ADFL.types import TrainingConfig, EvalConfig, FederatedResults, TCDataset
 from ADFL.model import get_mobile_net_v3_small
+from ADFL.sampling import sample_half_normal
 import ADFL.dataset as ds
 
 from ADFL.Strategy import Strategy, Simple, FedAsync, FedBuff, FADAS
@@ -94,6 +95,8 @@ def generate_model(dataset: TCDataset) -> nn.Module:
         return get_mobile_net_v3_small(num_classes=10, num_input_channels=3)
     elif dataset == TCDataset.MNIST:
         return get_mobile_net_v3_small(num_classes=10, num_input_channels=1)
+    elif dataset == TCDataset.NONE:
+        assert False, "Cannot get model for TCDataset.NONE"
 
 
 def create_datasets(
@@ -114,10 +117,19 @@ def init_ray(tmp_path: Union[str, None] = None) -> None:
         ray.init()
 
 
-def check_slowness_map(train_config: TrainingConfig) -> None:
-    """Asserts that the size of the slowness map is correct."""
-    if train_config.slowness_map is not None:
-        assert train_config.num_clients == len(train_config.slowness_map)
+def get_slowness_map(
+    slowness_map: Optional[List[float]], half_normal_sigma: Optional[float], num_clients: int
+) -> List[float]:
+    """Get the slowness map if needed."""
+    if slowness_map is not None:
+        assert num_clients == len(slowness_map)
+        return slowness_map
+
+    elif half_normal_sigma is None:
+        return [0.0] * num_clients
+
+    else:
+        return sample_half_normal(num_clients, half_normal_sigma)
 
 
 def check_sc_map(train_config: TrainingConfig) -> None:

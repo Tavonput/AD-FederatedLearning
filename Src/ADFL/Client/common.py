@@ -46,8 +46,8 @@ def _train_epoch(
 
     train_time = time.time() - start_time
 
-    # Simulate slowness
-    sleep_time = train_time * (slowness - 1)
+    # Simulate slowness. Note: used to be slowness - 1, but know it's just slowness
+    sleep_time = train_time * slowness
     time.sleep(sleep_time)
 
     results.accuracy = correct / total

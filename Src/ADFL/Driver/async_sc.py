@@ -16,7 +16,7 @@ from ADFL.Client import AsyncClientProxy
 from ADFL.Server import AsyncServer, TraditionalServer
 
 from .common import (
-    Driver, check_strategy, init_ray, check_slowness_map, check_eval_config, create_datasets, generate_model,
+    Driver, check_strategy, init_ray, get_slowness_map, check_eval_config, create_datasets, generate_model,
     federated_results_to_json
 )
 
@@ -62,17 +62,22 @@ class AsyncDriver(Driver):
 
     def init_training(self, train_config: TrainingConfig, eval_config: EvalConfig) -> None:
         self.log.info("Initialing training")
-        self.log.info(f"  Train config: {train_config}")
-        self.log.info(f"  Eval config: {eval_config}")
 
         self.train_config = train_config
         self.eval_config = eval_config
 
-        check_slowness_map(train_config)
+        # Get/check the slowness map
+        self.train_config.slowness_map = get_slowness_map(
+            train_config.slowness_map, train_config.slowness_sigma, train_config.num_clients
+        )
+
         check_eval_config(eval_config, train_config)
 
         assert train_config.strategy is not None
         check_strategy(self.use_traditional, train_config.strategy)
+
+        self.log.info(f"  Train config: {train_config}")
+        self.log.info(f"  Eval config: {eval_config}")
 
         self.log.info("Initializing remote flag")
         self.stop_flag = RemoteFlag()
@@ -107,7 +112,6 @@ class AsyncDriver(Driver):
         client_results: List[ClientResults] = ray.get(self.server.get_client_results.remote())
         self._build_and_savefederated_results(client_results, server_accuracies, start_time)
 
-
         if self.timeline_path is not None:
             ray.timeline(filename=self.timeline_path)
             self.log.info(f"Timeline saved to {self.timeline_path}")
@@ -135,14 +139,14 @@ class AsyncDriver(Driver):
 
     def _init_clients(self) -> List[AsyncClientProxy]:
         self.log.info(f"Initializing {self.train_config.num_clients} clients")
+        assert self.train_config.slowness_map is not None
 
         clients = [
             AsyncClientProxy(
                 client_id    = i,
                 train_loader = self._create_train_loader(i),
                 test_loader  = self._create_eval_loader() if self.eval_config.num_actors == 0 else None,  # type: ignore
-                slowness     = (self.train_config.slowness_map[i] if self.train_config.slowness_map is not None \
-                                else 1.0),
+                slowness     = self.train_config.slowness_map[i],
                 train_config = self.train_config,
                 eval_config  = self.eval_config,
                 server       = self.server,
