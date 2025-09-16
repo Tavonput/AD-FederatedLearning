@@ -38,6 +38,18 @@ class Strategy(ABC):
 
 
     @abstractmethod
+    def select_client(self, num_clients: int) -> int:
+        """Select a client."""
+        pass
+
+
+    @abstractmethod
+    def on_client_finish(self, client_id: int) -> None:
+        """Notify that a client has finished to update the client selection process."""
+        pass
+
+
+    @abstractmethod
     def produce_update(self, agg_info: AggregationInfo) -> Parameters:
         """Produce the parameters for the next update."""
         pass

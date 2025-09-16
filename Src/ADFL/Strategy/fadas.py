@@ -49,6 +49,10 @@ class FADAS(Strategy):
         return self.round
 
 
+    def select_client(self, num_clients: int) -> int:
+        assert False
+
+
     def produce_update(self, agg_info: AggregationInfo) -> Parameters:
         assert len(agg_info.all_c_params) == 1
         c_update = agg_info.all_c_params[0]

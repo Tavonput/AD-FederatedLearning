@@ -1,28 +1,36 @@
 import time
-from typing import Tuple
-
-import torch.nn as nn
+from typing import Tuple, Optional
 
 from ADFL.messages import AsyncClientTrainMessage, EvalMessage
-from ADFL.compression import compress_model
 from ADFL.types import Scalar
 from ADFL.model import Parameters
 from ADFL.eval import EvalActorProxy
 
-from ADFL.Client import AsyncClientProxy
+from ADFL.Channel import Channel
+from ADFL.Client import AsyncClient, AsyncClientWorkerProxy
 
 
 def train_client(
-    client: AsyncClientProxy, model: nn.Module, g_round: int, epochs: int, method: str, bits: int
+    client:    AsyncClient,
+    worker:    AsyncClientWorkerProxy,
+    params:    Parameters,
+    g_round:   int,
+    epochs:    int,
+    channel:   Channel,
+    bandwidth: Optional[float],
 ) -> Tuple[float, float]:
     """Train an AsyncClient and get the compression and bandwidth times."""
-    c_params, c_time = compress_model(model, method, bits)
+    c_params, c_time = channel.on_server_send(params)
     msg = AsyncClientTrainMessage(c_params, epochs, g_round)
 
     start_time = time.time()
-    client.train(msg)
-    b_time = time.time() - start_time
 
+    if bandwidth is not None:
+        _ = channel.simulate_bandwidth(params, bandwidth)
+
+    worker.train_client(client, msg)
+
+    b_time = time.time() - start_time
     return c_time, b_time
 
 

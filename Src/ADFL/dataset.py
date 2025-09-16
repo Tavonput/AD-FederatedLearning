@@ -1,13 +1,16 @@
-from typing import List, Optional
+from typing import List, Optional, Dict, Union, Tuple
 from collections.abc import Sized
 from dataclasses import dataclass
+from pathlib import Path
 
 from torch.utils.data import random_split, Dataset
 from torchvision import datasets, transforms
 
+import torch
 import numpy as np
+from PIL import Image
 
-from .types import TCDataset, NDArrayT2
+from .types import TrainingConfig, NDArrayT2
 from .sampling import sample_without_replacement
 
 
@@ -37,16 +40,83 @@ class NumpyDataset(Dataset):
 
     def __getitem__(self, index):
         data, label = self.data[index], self.labels[index]
+
+        # They do this in the pytorch datasets
+        data = Image.fromarray(data)
+
         if self.transform:
             data = self.transform(data)
         return data, label
 
 
+class NumpyTokenizedDataset(Dataset):
+    """Numpy Tokenized Dataset
+
+    This dataset is only meant to be used for providing the correct format to _get_noniid_splits(). This is probably
+    not the ideal way to doing things, but it works for now.
+    """
+    def __init__(self, data_path: Path) -> None:
+        print(f"Loading dataset {data_path}")
+        data_dict: Dict[str, torch.Tensor] = torch.load(data_path)
+        self.data = torch.stack([data_dict["input_ids"], data_dict["attention_mask"]], dim=1).numpy()  # (n, 2, d)
+        self.targets = data_dict["labels"].numpy()
+
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+
+    def __getitem__(self, index) -> Tuple[np.ndarray, np.ndarray]:
+        return self.data[index], self.targets[index]
+
+
+class TokenizedDataset(Dataset):
+    """Tokenized Dataset.
+
+    Dataset for tokenized training data. If a data path is provided, the data should be stored as a dict[str,
+    torch.Tensor] with keys, input_ids, attention_mask, and labels.
+
+    If numpy arrays are provided, the data should be shape (n, 2, d) where n is the number of samples, 2 is (input_ids,
+    attention_mask), and d is the token string length.
+    """
+    def __init__(self, data: Union[Path, NDArrayT2]) -> None:
+        if isinstance(data, Path):
+            print(f"Loading dataset {data}")
+            self.data = torch.load(data)
+        else:
+            # data[0] is assumed to be the data and data[1] is assumed to be the labels
+            self.data = {
+                "input_ids": torch.from_numpy(data[0][:, 0]),
+                "attention_mask": torch.from_numpy(data[0][:, 1]),
+                "labels": torch.from_numpy(data[1])
+            }
+
+
+    def __len__(self) -> int:
+        return self.data["input_ids"].size(0)
+
+
+    def __getitem__(self, index) -> Dict:
+        return {
+            "input_ids": self.data["input_ids"][index],
+            "attention_mask": self.data["attention_mask"][index],
+            "labels": self.data["labels"][index],
+        }
+
+
 def create_datasets(
-    dataset: TCDataset, data_path: str, num_splits: int, iid: bool, alpha: float = 0.1, seed: int = 0
+    dataset: TrainingConfig.Dataset,
+    num_splits: int,
+    iid: bool,
+    data_path: Optional[str] = None,
+    train_path: Optional[str] = None,
+    test_path: Optional[str] = None,
+    alpha: float = 0.1,
+    seed: int = 0
 ) -> DatasetSplit:
     """Get a partitioned dataset."""
-    if dataset == TCDataset.CIFAR10:
+    if dataset == TrainingConfig.Dataset.CIFAR10:
+        assert data_path is not None
         transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
@@ -54,18 +124,37 @@ def create_datasets(
         full_dataset = datasets.CIFAR10(root=data_path, train=True, transform=transform, download=True)
         test_set = datasets.CIFAR10(root=data_path, train=False, transform=transform, download=True)
 
-    elif dataset == TCDataset.MNIST:
+    elif dataset == TrainingConfig.Dataset.MNIST:
+        assert data_path is not None
         transform = transforms.Compose([transforms.ToTensor()])
         full_dataset = datasets.MNIST(root=data_path, train=True, transform=transform, download=True)
         test_set = datasets.MNIST(root=data_path, train=False, transform=transform, download=True)
 
+    elif dataset == TrainingConfig.Dataset.FMNIST:
+        assert data_path is not None
+        transform = transforms.Compose([transforms.ToTensor()])
+        full_dataset = datasets.FashionMNIST(root=data_path, train=True, transform=transform, download=True)
+        test_set = datasets.FashionMNIST(root=data_path, train=False, transform=transform, download=True)
+
+    elif dataset == TrainingConfig.Dataset.SENT140:
+        assert train_path is not None and test_path is not None
+        transform = None
+
+        if iid:
+            full_dataset = TokenizedDataset(Path(train_path))
+        else:
+            # _get_noniid_splits() will convert this to a list of TokenizedDataset
+            full_dataset = NumpyTokenizedDataset(Path(train_path))
+
+        test_set = TokenizedDataset(Path(test_path))
+
     else:
-        assert False, "Only CIFAR10 and MNIST are supported"
+        assert False, "Encountered unsupported dataset"
 
     if iid:
         split_datasets = _get_iid_splits(full_dataset, num_splits)
     else:
-        split_datasets = _get_noniid_splits(full_dataset, num_splits, alpha, seed, transform)
+        split_datasets = _get_noniid_splits(full_dataset, dataset, num_splits, alpha, seed, transform)
 
     assert isinstance(split_datasets[0], Sized)
     return DatasetSplit(split_datasets, test_set, len(full_dataset), len(split_datasets[0]))
@@ -73,13 +162,18 @@ def create_datasets(
 
 def _get_iid_splits(dataset: Dataset, num_splits: int) -> List[Dataset]:
     """Generate IID dataset partitions. Note that it is not 100% IID."""
-    assert isinstance(dataset, Sized)
+    assert isinstance(dataset, Sized)  # Has __len__
     assert len(dataset) % num_splits == 0
     return random_split(dataset, [len(dataset) // num_splits] * num_splits)  # type: ignore
 
 
 def _get_noniid_splits(
-    dataset: Dataset, num_splits: int, alpha: float, seed: int, transform: Optional[transforms.Compose]
+    dataset: Dataset,
+    dataset_label: TrainingConfig.Dataset,
+    num_splits: int,
+    alpha: float,
+    seed: int,
+    transform: Optional[transforms.Compose]
 ) -> List[Dataset]:
     """Generate Non-IID dataset partitions based on a Dirichlet distribution.
 
@@ -118,7 +212,7 @@ def _get_noniid_splits(
             empty_classes,
         )
 
-    return _splits_to_datasets(splits, transform)
+    return _splits_to_datasets(splits, transform, dataset_label)
 
 
 def _shuffle(x: np.ndarray, y: np.ndarray) -> NDArrayT2:
@@ -138,7 +232,15 @@ def _squeeze_numpy_to_list(array: np.ndarray) -> List[np.ndarray]:
     return [array[i] for i in range(array.shape[0])]
 
 
-def _splits_to_datasets(splits: List[NDArrayT2], transform: Optional[transforms.Compose] = None) -> List[Dataset]:
-    """Convert a list of data splits into PyTorch Datasets."""
-    return [NumpyDataset(data, labels, transform) for data, labels in splits]
+def _splits_to_datasets(
+    splits: List[NDArrayT2],
+    transform: Optional[transforms.Compose],
+    dataset_label: TrainingConfig.Dataset,
+) -> List[Dataset]:
+    """Convert a list of data splits into Datasets."""
+    if dataset_label == TrainingConfig.Dataset.SENT140:
+        return [TokenizedDataset(split) for split in splits]
+    else:
+        # This is probably an image dataset
+        return [NumpyDataset(data, labels, transform) for data, labels in splits]
 

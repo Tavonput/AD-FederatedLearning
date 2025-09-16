@@ -10,7 +10,7 @@ import ray
 from ADFL import my_logging
 from ADFL.resources import NUM_CPUS, NUM_GPUS
 from ADFL.types import RoundResults
-from ADFL.messages import ClientUpdate
+from ADFL.messages import ClientUpdateMessage
 from ADFL.model import Parameters, get_model_parameters, set_model_parameters
 
 from .common import LR, _train_epoch
@@ -46,7 +46,7 @@ class SyncClient:
         self.ready = True
         return True
 
-    def train(self, parameters: Parameters, epochs: int = 1) -> ClientUpdate:
+    def train(self, parameters: Parameters, epochs: int = 1) -> ClientUpdateMessage:
         self.round += 1
         self.log.info(f"Starting training round {self.round}")
         start_time = time.time()
@@ -69,10 +69,10 @@ class SyncClient:
         self.log.info("Finished training")
         return self._create_update(round_results)
 
-    def _create_update(self, round_results: RoundResults) -> ClientUpdate:
+    def _create_update(self, round_results: RoundResults) -> ClientUpdateMessage:
         self.model.to("cpu")
 
-        return ClientUpdate(
+        return ClientUpdateMessage(
             parameters=get_model_parameters(self.model),
             client_id=self.client_id,
             client_round=self.round,

@@ -1,12 +1,12 @@
 import json
 import os
-from typing import Dict, TypeAlias, List, Any
+from typing import Dict, TypeAlias, List, Any, Literal, Tuple
 
 import numpy as np
 
 from ADFL.types import (
     ClientResults, RoundResults, TrainResults, FederatedResults,
-    Accuracy, TrainingConfig, TCDataset, TCMethod, EvalConfig, ScalarPair
+    Accuracy, TrainingConfig, EvalConfig, ScalarPair
 )
 
 
@@ -40,14 +40,29 @@ class FederatedResultsExplorer:
 
         self.fr.paradigm = data["paradigm"]
         self.fr.g_start_time = data["g_start_time"]
+        self.fr.total_g_rounds = self._get(data, "total_g_rounds")
+        self.fr.q_errors_mse = self._get(data, "q_errors_mse")
+        self.fr.q_errors_cos = self._get(data, "q_errors_cos")
+        self.fr.model_dists = self._get(data, "model_dists")
         self._set_c_accuracies(data)
         self._set_train_config(data)
         self._set_eval_config(data)
         self._set_client_results(data)
 
 
-    def get_central_accuracies_final(self, window: int) -> float:
-        """Get the median final central accuracy."""
+    def get_time_to_target_accuracy(self, target_accuracy: float) -> float:
+        """Get the time taken to reach a target accuracy. 0 if not reached."""
+        accuracies = self.get_central_accuracies_raw()
+
+        for t, accuracy in accuracies:
+            if accuracy >= target_accuracy:
+                return t
+
+        return 0
+
+
+    def get_central_accuracies_final(self, window: int, method: Literal["mean", "median"]) -> Tuple[float, float]:
+        """Get the final central accuracy with the std."""
         central_accuracies = self.get_central_accuracies_raw()
 
         latest_time = central_accuracies[-1][0]
@@ -59,7 +74,13 @@ class FederatedResultsExplorer:
 
             recent_accuracies.append(acc)
 
-        return np.median(recent_accuracies)  # type: ignore
+        m_accuracy = 0
+        if method == "mean":
+            m_accuracy = np.mean(recent_accuracies)
+        elif method == "median":
+            m_accuracy = np.median(recent_accuracies)
+
+        return float(m_accuracy), float(np.std(recent_accuracies))
 
 
     def get_central_accuracies_raw(self) -> ScalarPairs:
@@ -91,27 +112,109 @@ class FederatedResultsExplorer:
         return all_mses
 
 
+    def get_round_throughput(self) -> float:
+        """Get the round throughput."""
+        # Find the time of the last round completed
+        last_round_time = self.fr.g_start_time
+        for client_result in self.fr.client_results:
+            for round_result in client_result.rounds:
+                round_end_time = round_result.g_start_time + round_result.round_time
+                if round_end_time > last_round_time:
+                    last_round_time = round_end_time
+
+        total_elapsed_time = last_round_time - self.fr.g_start_time
+        return self.fr.total_g_rounds / total_elapsed_time
+
+
+    def get_client_network_compute_ratios(self) -> List[float]:
+        """Get the ratio between network and compute times."""
+        ratios: List[float] = []
+
+        for client_result in self.fr.client_results:
+            total_compute_time, total_network_time = 0, 0
+
+            for round_result in client_result.rounds:
+                total_compute_time += round_result.compute_time
+                total_network_time += round_result.network_time
+
+            if total_compute_time == 0 or total_network_time == 0:
+                continue
+
+            ratios.append(total_network_time / total_compute_time)
+
+        return ratios
+
+
+    def get_per_client_network_compute_times(self, method: Literal["total", "mean"]) -> ScalarPairs:
+        """Get the network and compute times per client, either total or mean."""
+        times: ScalarPairs = []
+
+        for client_result in self.fr.client_results:
+            total_compute_time, total_network_time = 0, 0
+
+            for round_result in client_result.rounds:
+                total_compute_time += round_result.compute_time
+                total_network_time += round_result.network_time
+
+            if len(client_result.rounds) == 0:
+                times.append((0, 0))
+
+            if method == "total":
+                times.append((total_network_time, total_compute_time))
+            elif method == "mean":
+                times.append((
+                    total_network_time / len(client_result.rounds),
+                    total_compute_time / len(client_result.rounds),
+                ))
+
+        return times
+
+
+    def get_client_network_compute_times(self, method: Literal["total", "mean"]) -> Tuple[ScalarPair, ScalarPair]:
+        """Get the network and compute times across all clients, either total or mean along with the std."""
+        compute_times, network_times, total_rounds = [], [], 0
+
+        for client_result in self.fr.client_results:
+            for round_result in client_result.rounds:
+                compute_times.append(round_result.compute_time)
+                network_times.append(round_result.network_time)
+                total_rounds += 1
+
+        assert total_rounds == self.fr.total_g_rounds
+
+        compute_times_std = np.std(compute_times).item()
+        network_times_std = np.std(network_times).item()
+
+        if method == "total":
+            return (
+                (np.sum(network_times).item(), network_times_std),
+                (np.sum(compute_times).item(), compute_times_std),
+            )
+        elif method == "mean":
+            return (
+                (np.mean(network_times).item(), network_times_std),
+                (np.mean(compute_times).item(), compute_times_std),
+            )
+
+
     def _set_train_config(self, data: Dict) -> None:
         d_train_config: t_train_config = data["train_config"]
 
         dataset = self._get(d_train_config, "dataset", "none")
 
         self.fr.train_config = TrainingConfig(
-            method       = self._get(d_train_config, "method", TCMethod.NONE),
-            dataset      = TCDataset(dataset),
-            strategy     = None,  # Not parsed
-            num_rounds   = self._get(d_train_config, "num_rounds"),
-            num_epochs   = self._get(d_train_config, "num_epochs"),
-            num_clients  = self._get(d_train_config, "num_clients"),
-            num_servers  = self._get(d_train_config, "num_servers"),
-            batch_size   = self._get(d_train_config, "batch_size"),
-            max_rounds   = self._get(d_train_config, "max_rounds"),
-            timeout      = self._get(d_train_config, "timeout"),
-            compress     = self._get(d_train_config, "compress"),
-            quant_lvl_1  = self._get(d_train_config, "quant_lvl_1"),
-            quant_lvl_2  = self._get(d_train_config, "quant_lvl_2"),
-            slowness_map = self._get(d_train_config, "slowness_map"),
-            sc_map       = self._get(d_train_config, "sc_map"),
+            dataset         = TrainingConfig.Dataset(dataset),
+            channel         = self._get(d_train_config, "channel"),
+            strategy        = None,  # Not parsed
+            num_rounds      = self._get(d_train_config, "num_rounds"),
+            num_epochs      = self._get(d_train_config, "num_epochs"),
+            num_clients     = self._get(d_train_config, "num_clients"),
+            num_cur_clients = self._get(d_train_config, "num_cur_clients"),
+            num_servers     = self._get(d_train_config, "num_servers"),
+            batch_size      = self._get(d_train_config, "batch_size"),
+            max_rounds      = self._get(d_train_config, "max_rounds"),
+            timeout         = self._get(d_train_config, "timeout"),
+            delay           = self._get(d_train_config, "delay"),
         )
 
 
@@ -164,13 +267,17 @@ class FederatedResultsExplorer:
             train_result = self._parse_train_result(d_train_result)
             train_results.append(train_result)
 
+        g = lambda x: self._get(d_round_result, x)
+
         return RoundResults(
-            self._get(d_round_result, "train_round"),
-            train_results,
-            self._get(d_round_result, "round_time"),
-            self._get(d_round_result, "epochs"),
-            self._get(d_round_result, "g_start_time"),
-            self._get(d_round_result, "mse"),
+            train_round   = g("train_round"),
+            train_results = train_results,
+            round_time    = g("round_time"),
+            compute_time  = g("compute_time"),
+            network_time  = g("network_time"),
+            epochs        = g("epochs"),
+            g_start_time  = g("g_start_time"),
+            mse           = g("mse"),
         )
 
 
@@ -198,10 +305,8 @@ class FederatedResultsExplorer:
 
 
     def _get(self, data: Dict, key: str, default: Any = None) -> Any:
-        value = data.get(key)
-
-        if value is None:
+        if key in data:
+            return data[key]
+        else:
             print(f"{self.filepath}: Failed to get key={key}")
             return default
-
-        return value

@@ -6,22 +6,22 @@ from torch.utils.data import DataLoader
 from torch.optim.optimizer import Optimizer
 
 from ADFL.types import TrainResults
-from ADFL.model import Parameters
+from ADFL.model import Parameters, model_forward
 
 
-LR = 0.001
+LR = 0.001  # CNN
+# LR = 0.00002  # LLM
 
 
-def _train_epoch(
+def train_epoch(
     model: nn.Module,
     optimizer: Optimizer,
     criterion: nn.Module,
     dataloader: DataLoader,
-    device: str,
-    slowness: float,
+    device: torch._C.device,
     save_running_loss: bool = False
 ) -> TrainResults:
-    """Train a model for one epoch with a given slowness."""
+    """Train a model for one epoch."""
     model.to(device)
     model.train()
 
@@ -31,29 +31,24 @@ def _train_epoch(
 
     correct, total = 0, 0
 
-    for inputs, labels in dataloader:
-        inputs, labels = inputs.to(device), labels.to(device)
+    for batch in dataloader:
+        forward_results = model_forward(model, batch, device, criterion)
+
+        results.running_loss.append((forward_results.loss.item(), time.time() - start_time))
 
         optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
+        forward_results.loss.backward()
         optimizer.step()
 
-        results.running_loss.append((loss.item(), time.time() - start_time))
-        total += labels.size(0)
-        correct += (torch.max(outputs.data, 1)[1] == labels).sum().item()
+        total += forward_results.n_samples
+        correct += forward_results.correct
 
     train_time = time.time() - start_time
 
-    # Simulate slowness. Note: used to be slowness - 1, but know it's just slowness
-    sleep_time = train_time * slowness
-    time.sleep(sleep_time)
-
     results.accuracy = correct / total
     results.sum_loss = sum(loss[0] for loss in results.running_loss)
-    results.average_loss = results.sum_loss / len(dataloader.dataset)
-    results.elapsed_time = train_time + sleep_time
+    results.average_loss = results.sum_loss / len(dataloader.dataset)  # type: ignore
+    results.elapsed_time = train_time
 
     if save_running_loss is False:
         results.running_loss.clear()
@@ -61,10 +56,10 @@ def _train_epoch(
     return results
 
 
-def _evaluate(
+def evaluate(
     model:      nn.Module,
     dataloader: DataLoader,
-    device:     str,
+    device:     torch._C.device,
 ) -> float:
     """Evaluate a model."""
     model.to(device)
@@ -74,17 +69,13 @@ def _evaluate(
     num_correct = 0
 
     with torch.no_grad():
-        for inputs, labels in dataloader:
-            inputs = inputs.to(device)
-            labels = labels.to(device)
+        for batch in dataloader:
+            forward_results = model_forward(model, batch, device)
 
-            outputs = model(inputs)
-            outputs = outputs.argmax(dim=1)
+            num_samples += forward_results.n_samples
+            num_correct += forward_results.correct
 
-            num_samples += labels.size(0)
-            num_correct += (outputs == labels).sum()
-
-    return (num_correct / num_samples * 100).item()  # type: ignore
+    return num_correct / num_samples * 100
 
 
 def diff_parameters(params_a: Parameters, params_b: Parameters) -> Parameters:
@@ -102,4 +93,3 @@ def diff_parameters(params_a: Parameters, params_b: Parameters) -> Parameters:
 class AsyncServer:
     # Defined in ADFL/server.py
     pass
-

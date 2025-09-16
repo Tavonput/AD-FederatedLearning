@@ -1,4 +1,4 @@
-from typing import Tuple, List, Union, Optional
+from typing import Tuple, List, Union, Optional, Dict
 from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
@@ -15,12 +15,13 @@ ScalarList = Union[np.ndarray, List[float], List[int]]
 @dataclass
 class PlotConfig:
     """A configuration class for common plot settings."""
-    title:        str               = "title"
-    xlabel:       str               = "xlabel"
-    ylabel:       str               = "ylabel"
-    figsize:      Tuple[int, int]   = (10, 6)
-    grid:         Tuple[bool, bool] = (True, True)
-    tight_layout: bool              = True
+    title:        str                           = "title"
+    xlabel:       str                           = "xlabel"
+    ylabel:       str                           = "ylabel"
+    ylim:         Optional[Tuple[float, float]] = None
+    figsize:      Tuple[int, int]               = (10, 6)
+    grid:         Tuple[bool, bool]             = (True, True)
+    tight_layout: bool                          = True
 
 
     def apply(self, fig: Figure, ax: Axes) -> None:
@@ -39,24 +40,29 @@ class PlotConfig:
         if self.grid[1]:
             ax.grid(True, axis="y", linestyle="-")
 
+        if self.ylim is not None:
+            ax.set_ylim(self.ylim)
+
 
 def plot_histogram(
-    data:      ScalarList,
+    data:      Dict[str, ScalarList],
     conifg:    PlotConfig,
     bins:      Union[int, str] = "auto",
     alpha:     float           = 0.7,
     kde:       bool            = False,
+    element:   str             = "bars",
     show:      bool            = True,
     save_path: Optional[str]   = None,
 ) -> Tuple[Figure, Axes]:
     """Create a histogram.
 
     Args:
-        data: Input data (np.ndarray or list).
+        data: Input data {name: list}.
         config: PlotConfig object.
         bins: Number of bins or binning strategy (see sns.histplot).
         alpha: Transparency of bars.
         kde: Whether to overlay a kernel density estimate.
+        element: Visual representation.
         show: Whether to show the plot.
         save_path: Path to save the plot (optional).
 
@@ -72,6 +78,7 @@ def plot_histogram(
         edgecolor="white",
         alpha=alpha,
         kde=kde,
+        element=element,  # type: ignore
         ax=ax,
     )
 
@@ -80,22 +87,26 @@ def plot_histogram(
 
 
 def plot_line(
-    x:         ScalarList,
-    y:         ScalarList,
-    config:    PlotConfig,
-    linestyle: str           = "-",
-    marker:    Optional[str] = None,
-    show:      bool          = True,
-    save_path: Optional[str] = None,
+    x:          List[ScalarList],
+    y:          List[ScalarList],
+    config:     PlotConfig,
+    errors:     Optional[List[ScalarList]]    = None,
+    linestyles: Optional[List[str]]           = None,
+    markers:    Optional[List[Optional[str]]] = None,
+    labels:     Optional[List[Optional[str]]] = None,
+    show:       bool                          = True,
+    save_path:  Optional[str]                 = None,
 ) -> Tuple[Figure, Axes]:
-    """Create a line plot.
+    """Create a line plot with multiple lines.
 
     Args:
-        x: X-axis data.
-        y: Y-axis data.
+        x: List of X-axis data for each line.
+        y: List of Y-axis data for each line.
         config: PlotConfig object with common plot settings.
-        linestyle: Line style.
-        marker: Marker style.
+        errors: Error values to match y.
+        linestyles: List of line styles for each line (default: solid line for all).
+        markers: List of marker styles for each line (default: None for all).
+        labels: List of labels for each line (default: None for no labels).
         show: Whether to show the plot.
         save_path: Path to save the plot (optional).
 
@@ -105,13 +116,32 @@ def plot_line(
     fig, ax = plt.subplots()
     config.apply(fig, ax)
 
-    sns.lineplot(
-        x=x,
-        y=y,
-        linestyle=linestyle,
-        marker=marker,
-        ax=ax,
-    )
+    n_lines = len(x)
+    if linestyles is None:
+        linestyles = ["-" for _ in range(n_lines)]
+    if markers is None:
+        markers = [None for _ in range(n_lines)]
+    if labels is None:
+        labels = [None for _ in range(n_lines)]
+
+    for i in range(n_lines):
+        sns.lineplot(
+            x=x[i],
+            y=y[i],
+            linestyle=linestyles[i],
+            marker=markers[i],
+            label=labels[i],
+            ax=ax,
+        )
+
+        if errors is not None:
+            y_np = np.asarray(y[i])
+            error_np = np.asarray(errors[i])
+
+            plt.fill_between(x[i], y_np - error_np, y_np + error_np, alpha=0.3)
+
+    if any(label is not None for label in labels):
+        ax.legend()
 
     save_and_show(save_path, show)
     return fig, ax
@@ -121,7 +151,6 @@ def plot_scatter(
     x:         ScalarList,
     y:         ScalarList,
     config:    PlotConfig,
-    color:     str           = 'dodgerblue',
     alpha:     float         = 0.6,
     marker:    str           = 'o',
     size:      float         = 50,
@@ -135,7 +164,6 @@ def plot_scatter(
         x: X-axis data (numpy array or list).
         y: Y-axis data (numpy array or list).
         config: PlotConfig object with common plot settings.
-        color: Color of scatter points.
         alpha: Transparency of points.
         marker: Marker style.
         size: Size of scatter points.
@@ -152,13 +180,16 @@ def plot_scatter(
     sns.scatterplot(
         x=x,
         y=y,
-        color=color,
+        # color=color,
         alpha=alpha,
         marker=marker,
-        s=size,
+        # s=size,
         label=label,
         ax=ax
     )
+
+    # This is for the client delay map. Should be removed in general
+    sns.move_legend(ax, loc="lower right")
 
     save_and_show(save_path, show)
     return fig, ax
@@ -186,3 +217,11 @@ def show_plot() -> None:
     """Wrapper around plt.show()."""
     plt.show()
 
+
+def set_global_rcparams() -> None:
+    """Set the global plt.rcParams for a professional look."""
+    plt.rcParams["font.family"] = "serif"
+    # plt.rcParams["font.weight"] = "bold"
+    plt.rcParams["figure.dpi"] = 300
+    plt.rcParams["lines.linewidth"] = 1.5
+    plt.rcParams["lines.markersize"] = 6

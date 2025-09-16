@@ -5,9 +5,17 @@ import numpy as np
 from .types import NDArrayT2
 
 
-def sample_half_normal(samples: int, sigma: float, seed: int = 0) -> List[float]:
+def sample_half_normal(
+    samples: int, sigma: float, shift: float = 0, seed: int = 1, reverse: bool = False
+) -> List[float]:
     """Sample from a half-normal distribution centered at 0."""
     values = np.abs(np.random.default_rng(seed).normal(0, sigma, samples))
+
+    if reverse:
+        values = np.max(values) - values
+
+    values += shift
+
     return [x.item() for x in values]
 
 

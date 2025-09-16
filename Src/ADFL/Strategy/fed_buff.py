@@ -1,4 +1,5 @@
-from typing import Dict
+from typing import Dict, List
+import random
 
 from ADFL.model import Parameters, add_parameters, add_parameters_inpace, parameter_mse
 
@@ -20,6 +21,10 @@ class FedBuff(Strategy):
         self.max_buffer_size = max_buffer_size
         self.buffer_size = 0
 
+        self.free_clients: List[int] = []
+        self.client_working_status: List[bool] = []
+        self.finished_clients: List[int] = []
+
         self.round = 1
 
         # See paper
@@ -33,6 +38,31 @@ class FedBuff(Strategy):
 
     def get_round(self) -> int:
         return self.round
+
+
+    def select_client(self, num_clients: int) -> int:
+        assert num_clients > 0
+
+        if len(self.free_clients) == 0:
+            self.free_clients = list(range(num_clients))
+            self.client_working_status = [False] * num_clients
+
+        idx = random.randint(0, len(self.free_clients) - 1)
+        client = self.free_clients[idx]
+        self.client_working_status[client] = True
+
+        self.free_clients[idx], self.free_clients[-1] = self.free_clients[-1], self.free_clients[idx]
+        self.free_clients.pop()
+
+        return client
+
+
+    def on_client_finish(self, client_id: int) -> None:
+        assert self.client_working_status[client_id] is True, "Detected client finished but was never working?"
+        self.client_working_status[client_id] = False
+
+        # Finished client will be added back into the selection pool after aggregation
+        self.finished_clients.append(client_id)
 
 
     def produce_update(self, agg_info: AggregationInfo) -> Parameters:
@@ -50,6 +80,10 @@ class FedBuff(Strategy):
 
         self.buffer_size += 1
         if self.buffer_size >= self.max_buffer_size:
+            # Add the finished clients from this buffer back to the selection pool
+            self.free_clients += self.finished_clients
+            self.finished_clients.clear()
+
             for tensor in self.buffer.values():
                 tensor.float().div_(self.max_buffer_size)
 

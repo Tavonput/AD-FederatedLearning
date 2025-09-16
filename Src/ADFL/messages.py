@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
-from .model import Parameters
-from .types import CompressedParameters, RoundResults
+from .model import Parameters, CompressedParameters
+from .types import RoundResults
 
 
 @dataclass
@@ -12,7 +12,7 @@ class AsyncClientTrainMessage:
 
 
 @dataclass
-class ClientUpdate:
+class ClientUpdateMessage:
     parameters:    CompressedParameters
     client_id:     int
     client_round:  int

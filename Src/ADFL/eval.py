@@ -1,23 +1,26 @@
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Callable
 from collections import defaultdict
 
 import ray
+import memray
 
-import torch 
+import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from . import my_logging
 from .resources import NUM_GPUS, NUM_CPUS
-from .model import Parameters
+from .model import Parameters, model_forward
 from .types import Accuracy
 from .messages import EvalMessage
+from .memory import MEMRAY_PATH, MEMRAY_RECORD
 
 
 AccuracyDict = Dict[int, List[Accuracy]]
 
 
-@ray.remote(num_cpus=NUM_CPUS, num_gpus=NUM_GPUS)
+# @ray.remote(num_cpus=NUM_CPUS, num_gpus=NUM_GPUS)
+@ray.remote(num_cpus=NUM_CPUS)
 class EvalActor:
     """Eval Actor.
 
@@ -25,13 +28,21 @@ class EvalActor:
 
     TODO: Make the functions not be specific to clients since the servers can use this now.
     """
-    def __init__(self, eval_id: int, model: nn.Module, test_loader: DataLoader):
+    def __init__(self, eval_id: int, model_fn: Callable[[], nn.Module], test_loader: DataLoader):
+        if MEMRAY_RECORD:
+            memray.Tracker(f"{MEMRAY_PATH}{self.__class__.__name__}_{eval_id}_mem_profile.bin").__enter__()
+
         self.log = my_logging.get_logger(f"EVAL {eval_id}")
         self.log.info("Initializing")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # self.device = torch.device("cpu")
+        if torch.cuda.is_available():
+            self.log.info(f"Using device: {self.device}:{torch.cuda.current_device()}")
+        else:
+            self.log.info(f"Using device: {self.device}")
 
-        self.model = model
+        self.model = model_fn()
         self.test_loader = test_loader
 
         self.accuracies: AccuracyDict = defaultdict(list)
@@ -76,17 +87,13 @@ class EvalActor:
         num_correct = 0
 
         with torch.no_grad():
-            for inputs, labels in self.test_loader:
-                inputs = inputs.to(self.device)
-                labels = labels.to(self.device)
+            for batch in self.test_loader:
+                forward_results = model_forward(self.model, batch, self.device)
 
-                outputs = self.model(inputs)
-                outputs = outputs.argmax(dim=1)
+                num_samples += forward_results.n_samples
+                num_correct += forward_results.correct
 
-                num_samples += labels.size(0)
-                num_correct += (outputs == labels).sum()
-
-        accuracy = (num_correct / num_samples * 100).item()  # type: ignore
+        accuracy = num_correct / num_samples * 100
         self._add_accuracy(message.client_id, accuracy, message.g_time)
 
         self.log.debug(f"Finished eval for client {message.client_id}: {accuracy:.2f}")
@@ -108,9 +115,9 @@ class EvalActorProxy:
 
     Wrapper for interacting with a ray EvalActor.
     """
-    def __init__(self, eval_id: int, model: nn.Module, test_loader: DataLoader):
+    def __init__(self, eval_id: int, model_fn: Callable[[], nn.Module], test_loader: DataLoader):
         self.eval_id = eval_id
-        self._actor = EvalActor.remote(eval_id, model, test_loader)
+        self._actor = EvalActor.remote(eval_id, model_fn, test_loader)
 
 
     def initialize(self, block: bool = True) -> ray.ObjectRef:

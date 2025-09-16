@@ -1,3 +1,6 @@
+"""
+This file is deprecated and no longer maintained.
+"""
 import time
 from typing import Tuple, Dict
 
@@ -6,9 +9,8 @@ import torch.nn as nn
 
 from ADFL.model import get_model_parameters
 
-from .model import Parameters
-from .types import (
-    MixedParameters, QuantParameters, QuantParameter, ByteParameters, ByteParameter, CompressedParameters
+from .model import (
+    Parameters, MixedParameters, QuantParameters, QuantParameter, ByteParameters, ByteParameter, CompressedParameters
 )
 
 
@@ -22,13 +24,12 @@ GiB = 1024 * MiB
 # ======================================================================================================================
 def quantize_tensor(tensor: torch.Tensor, bits: int) -> Tuple[torch.Tensor, float]:
     """Quantize a tensor."""
-    q_min = -2**(bits - 1)
     q_max = 2**(bits - 1) - 1
+    scale = torch.max(torch.abs(tensor)) / q_max
 
-    scale = q_max / torch.max(tensor)
-    q_tensor = (scale * tensor).round_().clamp_(q_min, q_max).to(torch.int8)
-
-    return q_tensor, scale.item()
+    quantizer = torch.quantize_per_tensor
+    q_tensor = quantizer(tensor, float(scale), 0, dtype=torch.qint8)
+    return q_tensor, float(scale)
 
 
 def pack_4bit(q_tensor: torch.Tensor) -> torch.Tensor:
@@ -67,6 +68,11 @@ def unpack_4bit(b_tensor: bytearray, shape: torch.Size) -> torch.Tensor:
 
 def dequantize_tensor(q_param: QuantParameter) -> torch.Tensor:
     """De-quantize a parameter."""
+    if q_param.data.ndim > 1:
+        return q_param.data.data.dequantize()
+    else:
+        return q_param.data.data
+
     raw_q_tensor = bytearray(q_param.data)
 
     if q_param.bits == 4:
@@ -78,26 +84,28 @@ def dequantize_tensor(q_param: QuantParameter) -> torch.Tensor:
 
 
 def quantize_params(params: Parameters, bits: int) -> QuantParameters:
-    """Quantize parameters with a given bit width.
-
-    TODO: What would happen if we don't quantize the running metrics.
-    """
+    """Quantize parameters with a given bit width. Biases and running metrics are not quantized."""
     q_params = QuantParameters({}, 0)
     for name, param in params.items():
-        q_param, scale = quantize_tensor(param, bits)
+        if param.ndim > 1:
+            q_param, scale = quantize_tensor(param, bits)
 
-        if bits == 4:
-            q_param = pack_4bit(q_param)
+            if bits == 4:
+                q_param = pack_4bit(q_param)
+        else:
+            q_param, scale = param, 1
 
         q_params.params[name] = QuantParameter(
-            data    = q_param.numpy().tobytes(),
+            data    = q_param,
             bits    = bits,
             scale   = scale,
+            signs   = torch.zeros(1, dtype=torch.uint8),
             shape   = param.shape,
             dtype   = param.dtype,
             q_dtype = q_param.dtype,
         )
-        q_params.size += len(q_params.params[name].data)
+        q_params.size += q_param.nbytes
+        # q_params.size += len(q_params.params[name].data)
 
     return q_params
 
@@ -152,7 +160,7 @@ def compress_mixed_params(params: Parameters, quant_map: Dict[str, bool], bits: 
                 q_param = pack_4bit(q_param)
 
             c_params.params[name] = QuantParameter(
-                data    = q_param.numpy().tobytes(),
+                data    = q_param.numpy().tobytes(),  # type: ignore
                 bits    = bits,
                 scale   = scale,
                 shape   = param.shape,
@@ -231,4 +239,3 @@ def compress_params(params: Parameters, method: str, bits: int = 8) -> Tuple[Com
         assert False, "Compress method not supported"
 
     return c_params, (time.time() - start_time)
-    

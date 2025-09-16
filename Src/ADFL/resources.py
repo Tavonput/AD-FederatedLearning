@@ -1,3 +1,4 @@
 NUM_CPUS = 1
-NUM_GPUS = 0.2
+NUM_GPUS = 0.045
+# NUM_GPUS = 0.09
 

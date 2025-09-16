@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Union, Any, Tuple, Optional, List
+from typing import Union, Any, Tuple, List, Optional
 from enum import Enum
 from dataclasses import asdict
 from itertools import chain
@@ -9,41 +9,16 @@ from abc import ABC, abstractmethod
 import ray
 
 import torch.nn as nn
-from torch.utils.data import Dataset
-from torchvision import transforms
 import numpy as np
 
-from ADFL.types import TrainingConfig, EvalConfig, FederatedResults, TCDataset
-from ADFL.model import get_mobile_net_v3_small
+from ADFL.types import ScalarPair, TrainingConfig, EvalConfig, FederatedResults
+from ADFL.model import get_mobile_net_v3_small, get_mobile_net_v3_large, get_resnet50, get_distilbert
 from ADFL.sampling import sample_half_normal
 import ADFL.dataset as ds
 
 from ADFL.Strategy import Strategy, Simple, FedAsync, FedBuff, FADAS
 
 NDArrayT2 = Tuple[np.ndarray, np.ndarray]
-
-
-class NumpyDataset(Dataset):
-    """Numpy Dataset.
-
-    Simple PyTorch Dataset from numpy data and labels.
-    """
-    def __init__(self, data: np.ndarray, labels: np.ndarray, transform: Optional[transforms.Compose] = None) -> None:
-        super().__init__()
-        self.data = data
-        self.labels = labels
-        self.transform = transform
-
-
-    def __len__(self):
-        return len(self.data)
-
-
-    def __getitem__(self, index):
-        data, label = self.data[index], self.labels[index]
-        if self.transform:
-            data = self.transform(data)
-        return data, label
 
 
 class Driver(ABC):
@@ -89,21 +64,50 @@ def run_driver(driver: Driver, train_config: TrainingConfig, eval_config: EvalCo
     driver.shutdown()
 
 
-def generate_model(dataset: TCDataset) -> nn.Module:
-    """Get a MobileNetV3 Small model with 10 classes."""
-    if dataset == TCDataset.CIFAR10:
-        return get_mobile_net_v3_small(num_classes=10, num_input_channels=3)
-    elif dataset == TCDataset.MNIST:
-        return get_mobile_net_v3_small(num_classes=10, num_input_channels=1)
-    elif dataset == TCDataset.NONE:
-        assert False, "Cannot get model for TCDataset.NONE"
+def generate_model(dataset: TrainingConfig.Dataset, model: str) -> nn.Module:
+    """Get a model with 10 classes."""
+    if dataset == TrainingConfig.Dataset.CIFAR10:
+        num_input_channels = 3
+    elif dataset == TrainingConfig.Dataset.MNIST or dataset == TrainingConfig.Dataset.FMNIST:
+        num_input_channels = 1
+    elif dataset == TrainingConfig.Dataset.SENT140:
+        num_input_channels = 0  # Not used
+    elif dataset == TrainingConfig.Dataset.NONE:
+        assert False, "Cannot get model for TrainingConfig.Dataset.NONE"
+
+    if model == "mobile_net_v3_small":
+        return get_mobile_net_v3_small(num_classes=10, num_input_channels=num_input_channels)
+    elif model == "mobile_net_v3_large":
+        return get_mobile_net_v3_large(num_classes=10, num_input_channels=num_input_channels)
+    elif model == "resnet_50":
+        return get_resnet50(num_classes=10, num_input_channels=num_input_channels)
+    elif model == "distilbert":
+        return get_distilbert(num_classes=2)
+    else:
+        assert False, "Invalid model"
 
 
 def create_datasets(
-    dataset: TCDataset, data_path: str, num_splits: int, iid: bool, alpha: float = 0.1, seed: int = 0
+    dataset: TrainingConfig.Dataset,
+    num_splits: int,
+    iid: bool,
+    data_path: Optional[str] = None,
+    train_path: Optional[str] = None,
+    test_path: Optional[str] = None,
+    alpha: float = 0.1,
+    seed: int = 0
 ) -> ds.DatasetSplit:
     """Get a partitioned dataset."""
-    return ds.create_datasets(dataset, data_path, num_splits, iid, alpha, seed)
+    return ds.create_datasets(
+        dataset=dataset,
+        num_splits=num_splits,
+        data_path=data_path,
+        train_path=train_path,
+        test_path=test_path,
+        iid=iid,
+        alpha=alpha,
+        seed=seed
+    )
 
 
 def init_ray(tmp_path: Union[str, None] = None) -> None:
@@ -112,32 +116,44 @@ def init_ray(tmp_path: Union[str, None] = None) -> None:
         ray.shutdown()
 
     if tmp_path is not None:
-        ray.init(_temp_dir=tmp_path)
+        ray.init(
+            _temp_dir=tmp_path,
+            include_dashboard=False,
+            object_store_memory=16 * (1024**3),
+        )
     else:
         ray.init()
 
 
-def get_slowness_map(
-    slowness_map: Optional[List[float]], half_normal_sigma: Optional[float], num_clients: int
-) -> List[float]:
-    """Get the slowness map if needed."""
-    if slowness_map is not None:
-        assert num_clients == len(slowness_map)
-        return slowness_map
+def get_delay_map(delay: TrainingConfig.Delay, num_clients: int) -> List[ScalarPair]:
+    """Get the delay map if needed."""
+    if delay.delay_map is not None:
+        assert num_clients == len(delay.delay_map)
+        return delay.delay_map
 
-    elif half_normal_sigma is None:
-        return [0.0] * num_clients
-
+    compute_delays: List[float] = []
+    if delay.compute_sigma is None:
+        compute_delays = [0.0] * num_clients
     else:
-        return sample_half_normal(num_clients, half_normal_sigma)
+        compute_delays = sample_half_normal(num_clients, delay.compute_sigma, seed=1)
+
+    network_delays: List[float] = []
+    if delay.network_sigma is None:
+        network_delays = [1.0] * num_clients
+    else:
+        network_delays = sample_half_normal(
+            num_clients, delay.network_sigma, shift=delay.network_shift, seed=5, reverse=True
+        )
+
+    return list(zip(compute_delays, network_delays))
 
 
 def check_sc_map(train_config: TrainingConfig) -> None:
     """Asserts that the server-client map layout is correct."""
-    if train_config.sc_map is not None:
-        assert train_config.num_servers == len(train_config.sc_map)
+    if train_config.delay.sc_map is not None:
+        assert train_config.num_servers == len(train_config.delay.sc_map)
 
-        all_clients = list(chain.from_iterable(train_config.sc_map))
+        all_clients = list(chain.from_iterable(train_config.delay.sc_map))
         assert train_config.num_clients == len(all_clients)
 
 

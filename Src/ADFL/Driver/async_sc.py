@@ -1,9 +1,10 @@
 import time
-from typing import List, Union
+from typing import List, Union, Callable
 
 import ray
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from ADFL import my_logging
@@ -12,11 +13,11 @@ from ADFL.model import Parameters
 from ADFL.eval import EvalActorProxy
 from ADFL.flag import RemoteFlag
 from ADFL.dataset import DatasetSplit
-from ADFL.Client import AsyncClientProxy
+from ADFL.Client import AsyncClient, AsyncClientWorkerProxy
 from ADFL.Server import AsyncServer, TraditionalServer
 
 from .common import (
-    Driver, check_strategy, init_ray, get_slowness_map, check_eval_config, create_datasets, generate_model,
+    Driver, check_strategy, init_ray, get_delay_map, check_eval_config, create_datasets, generate_model,
     federated_results_to_json
 )
 
@@ -48,7 +49,8 @@ class AsyncDriver(Driver):
         self.eval_config: EvalConfig = None  # type: ignore
 
         self.server: AsyncServerU = None  # type: ignore
-        self.clients: List[AsyncClientProxy] = []
+        self.clients: List[AsyncClient] = []
+        self.workers: List[AsyncClientWorkerProxy] = []
         self.evaluators: List[EvalActorProxy] = []
 
         self.dataset: DatasetSplit = None  # type: ignore
@@ -66,10 +68,10 @@ class AsyncDriver(Driver):
         self.train_config = train_config
         self.eval_config = eval_config
 
-        # Get/check the slowness map
-        self.train_config.slowness_map = get_slowness_map(
-            train_config.slowness_map, train_config.slowness_sigma, train_config.num_clients
-        )
+        assert train_config.num_cur_clients <= train_config.num_clients, "Not supported yet."
+
+        # Get/check the delay map
+        self.train_config.delay.delay_map = get_delay_map(train_config.delay, train_config.num_clients)
 
         check_eval_config(eval_config, train_config)
 
@@ -86,10 +88,10 @@ class AsyncDriver(Driver):
         self.evaluators = self._init_evaluators()
         self.server = self._init_server()
         self.clients = self._init_clients()
-
-        self._check_client_models()
+        self.workers = self._init_workers()
 
         ray.get(self.server.add_clients.remote(self.clients))
+        ray.get(self.server.add_workers.remote(self.workers))
 
 
     def run(self) -> None:
@@ -112,6 +114,11 @@ class AsyncDriver(Driver):
         client_results: List[ClientResults] = ray.get(self.server.get_client_results.remote())
         self._build_and_savefederated_results(client_results, server_accuracies, start_time)
 
+        finished_model = ray.get(self.server.get_model.remote())
+        if self.train_config.model_save is not None:
+            torch.save(finished_model, self.train_config.model_save)
+            self.log.info(f"Model saved to {self.train_config.model_save}")
+
         if self.timeline_path is not None:
             ray.timeline(filename=self.timeline_path)
             self.log.info(f"Timeline saved to {self.timeline_path}")
@@ -128,7 +135,9 @@ class AsyncDriver(Driver):
         self.log.info("Creating datasets")
         dataset_split = create_datasets(
             dataset    = self.train_config.dataset,
-            data_path  = "../Data",
+            data_path  = self.train_config.data_dir,
+            train_path = self.train_config.train_file,
+            test_path  = self.train_config.test_file,
             num_splits = self.train_config.num_clients,
             iid        = self.train_config.iid,
             alpha      = self.train_config.dirichlet_a
@@ -137,30 +146,25 @@ class AsyncDriver(Driver):
         return dataset_split
 
 
-    def _init_clients(self) -> List[AsyncClientProxy]:
+    def _init_clients(self) -> List[AsyncClient]:
         self.log.info(f"Initializing {self.train_config.num_clients} clients")
-        assert self.train_config.slowness_map is not None
+        assert self.train_config.delay.delay_map is not None
 
-        clients = [
-            AsyncClientProxy(
-                client_id    = i,
-                train_loader = self._create_train_loader(i),
-                test_loader  = self._create_eval_loader() if self.eval_config.num_actors == 0 else None,  # type: ignore
-                slowness     = self.train_config.slowness_map[i],
-                train_config = self.train_config,
-                eval_config  = self.eval_config,
-                server       = self.server,
-                evaluator    = self._get_evaluator_for_client(i)  # type: ignore
+        return [
+            AsyncClient(
+                client_id     = i,
+                model_fn      = lambda: generate_model(self.train_config.dataset, self.train_config.model),
+                train_loader  = self._create_train_loader(i),
+                test_loader   = self._create_eval_loader() if self.eval_config.num_actors == 0 else None,  # type: ignore
+                compute_delay = self.train_config.delay.delay_map[i][0],  # 0 is compute delay
+                network_delay = self.train_config.delay.delay_map[i][1],  # 1 is network delay
+                train_config  = self.train_config,
+                eval_config   = self.eval_config,
+                server        = self.server,
+                evaluator     = self._get_evaluator_for_client(i)  # type: ignore
             )
             for i in range(self.train_config.num_clients)
         ]
-
-        # Make sure that all of the clients are initialized
-        init_params: Parameters = ray.get(self.server.get_model.remote())
-        for client in clients:
-            client.init_model(lambda: generate_model(self.train_config.dataset), init_params)
-
-        return clients
 
 
     def _init_server(self) -> AsyncServerU: # type: ignore
@@ -170,7 +174,7 @@ class AsyncDriver(Driver):
 
         if self.use_traditional:
             server = TraditionalServer.remote(
-                lambda: generate_model(self.train_config.dataset),
+                self._get_model_fn(),
                 self.train_config,
                 self.eval_config,
                 evaluator,
@@ -178,7 +182,7 @@ class AsyncDriver(Driver):
             )
         else:
             server = AsyncServer.remote(
-                lambda: generate_model(self.train_config.dataset),
+                self._get_model_fn(),
                 self.train_config,
                 self.eval_config,
                 evaluator,
@@ -194,15 +198,31 @@ class AsyncDriver(Driver):
 
         evaluators = [
             EvalActorProxy(
-                eval_id=i,
-                model=generate_model(self.train_config.dataset),
-                test_loader=self._create_eval_loader(),
+                eval_id     = i,
+                model_fn    = lambda: generate_model(self.train_config.dataset, self.train_config.model),
+                test_loader = self._create_eval_loader(),
             )
             for i in range(self.eval_config.num_actors)
         ]
 
         [evaluator.initialize(block=True) for evaluator in evaluators]
         return evaluators
+
+
+    def _init_workers(self) -> List[AsyncClientWorkerProxy]:
+        self.log.info(f"Initializing {self.train_config.num_cur_clients} workers")
+
+        workers = [
+            AsyncClientWorkerProxy(
+                worker_id    = i,
+                train_config = self.train_config,
+                eval_config  = self.eval_config,
+            )
+            for i in range(self.train_config.num_cur_clients)
+        ]
+
+        [worker.initialize() for worker in workers]
+        return workers
 
 
     def _create_train_loader(self, i: int) -> DataLoader:
@@ -229,7 +249,7 @@ class AsyncDriver(Driver):
 
 
     def _build_and_savefederated_results(
-            self, client_results: List[ClientResults],server_accuracies: List[Accuracy], start_time: float
+        self, client_results: List[ClientResults],server_accuracies: List[Accuracy], start_time: float
     ) -> None:
         """Build and save a FederatedResults."""
         federated_results = FederatedResults(
@@ -239,6 +259,10 @@ class AsyncDriver(Driver):
             g_start_time   = start_time,
             client_results = client_results,
             c_accuracies   = server_accuracies,
+            total_g_rounds = ray.get(self.server.get_g_rounds.remote()),
+            q_errors_mse   = ray.get(self.server.get_q_errors_mse.remote()),
+            q_errors_cos   = ray.get(self.server.get_q_errors_cos.remote()),
+            model_dists    = ray.get(self.server.get_model_dist.remote()),
         )
 
         federated_results_to_json(self.results_path, federated_results)
@@ -262,3 +286,19 @@ class AsyncDriver(Driver):
 
             for key in base:
                 assert torch.equal(base[key], other[key])
+
+
+    def _get_model_fn(self) -> Callable[[], nn.Module]:
+        if self.train_config.model_load is None:
+            return lambda: generate_model(self.train_config.dataset, self.train_config.model)
+        else:
+            self.log.info(f"Setting server model initialization to {self.train_config.model_load}")
+            load_path = self.train_config.model_load
+
+            def get_model():
+                model = generate_model(self.train_config.dataset, self.train_config.model)
+                model.load_state_dict(torch.load(load_path, weights_only=True))
+                return model
+
+            return get_model
+

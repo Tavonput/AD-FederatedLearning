@@ -1,8 +1,12 @@
 Abstract the async servers by making one async server class, then create an AsyncTrainer and a TraditionalTrainer.
 
-Track the model parameter distribution and delta distribution over time. My hypothesis is that the delta distribution
-will be smaller and more closely compacted around zero. Also maybe track the quantization error (this will hinder 
-performance as need to do some additional communication and computation, but this will be just a study on error, not
-performance)?
+QAFeLServer:
 
-Better visuals for accuracy and loss.
+QAFeLClient:
+    model: nn.Module
+    hidden_state: Parameters
+
+    function train():
+        
+
+QAFeLClientWorker:

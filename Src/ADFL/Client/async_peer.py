@@ -14,7 +14,7 @@ from ADFL.resources import NUM_CPUS, NUM_GPUS
 from ADFL.types import (
     TrainingConfig, RoundResults, ClientResults, Accuracy, EvalConfig
 ) 
-from ADFL.messages import ClientUpdate, EvalMessage
+from ADFL.messages import ClientUpdateMessage, EvalMessage
 from ADFL.eval import EvalActorProxy
 from ADFL.model import get_model_parameters, set_model_parameters, simple_aggregate
 
@@ -43,7 +43,7 @@ class AsyncPeerClient:
         self.test_loader = test_loader
         self.round = 0
         self.slowness = slowness
-        self.updates: List[ClientUpdate] = []
+        self.updates: List[ClientUpdateMessage] = []
         self.other_clients = []
         self.results = ClientResults(client_id)
 
@@ -75,7 +75,7 @@ class AsyncPeerClient:
         """Get the message logs."""
         return self.message_log
 
-    def receive_update(self, update: ClientUpdate) -> None:
+    def receive_update(self, update: ClientUpdateMessage) -> None:
         with self.update_lock:
             self.updates.append(update)
 
@@ -139,7 +139,7 @@ class AsyncPeerClient:
 
         self.model.to("cpu")
 
-        update = ClientUpdate(
+        update = ClientUpdateMessage(
             parameters=get_model_parameters(self.model),
             client_id=self.client_id,
             client_round=self.round,
@@ -167,7 +167,7 @@ class AsyncPeerClient:
             #             params.data = (params + update.parameters[name]) / 2
 
             # Add our personal model to the list of updates for the subsequent average
-            self.updates.append(ClientUpdate(get_model_parameters(self.model), self.client_id, self.round, None))
+            self.updates.append(ClientUpdateMessage(get_model_parameters(self.model), self.client_id, self.round, None))
 
             with torch.no_grad():
                 for name, params in self.model.named_parameters():
@@ -273,7 +273,7 @@ class AsyncPeerClientV2:
 
         self._send_updates(train_round)
 
-    def receive_update(self, client_update: ClientUpdate) -> None:
+    def receive_update(self, client_update: ClientUpdateMessage) -> None:
         """Message: Received update from another client, thus aggregate."""
         self.message_log.append(f"U_{client_update.client_id}")
 
@@ -307,11 +307,11 @@ class AsyncPeerClientV2:
         self.log.info("Finished training")
 
     def _send_updates(self, train_round: int) -> None:
-        """Send a ClientUpdate to the other clients."""
+        """Send a ClientUpdateMessage to the other clients."""
         self.log.info("Sending updates")
         self.model.to("cpu")
 
-        update = ClientUpdate(
+        update = ClientUpdateMessage(
             parameters    = get_model_parameters(self.model),
             client_id     = self.client_id,
             client_round  = train_round,
@@ -469,7 +469,7 @@ class AsyncPeerClientV3:
         self._train_round(train_round, epochs)
         self.ref.train.remote(train_round + 1, epochs)
 
-    def receive_update(self, client_update: ClientUpdate) -> None:
+    def receive_update(self, client_update: ClientUpdateMessage) -> None:
         """Message: Received update from another client, thus aggregate."""
         self.message_log.append(f"U_{client_update.client_id}")
 
@@ -508,12 +508,12 @@ class AsyncPeerClientV3:
         self.log.info("Finished training")
 
     def _send_updates(self, train_round: int) -> None:
-        """Send a ClientUpdate to the other clients."""
+        """Send a ClientUpdateMessage to the other clients."""
         self.log.info("Sending updates")
 
         self.model.to("cpu")
 
-        update = ClientUpdate(
+        update = ClientUpdateMessage(
             parameters=get_model_parameters(self.model),
             client_id=self.client_id,
             client_round=train_round,

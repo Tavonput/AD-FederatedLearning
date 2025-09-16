@@ -9,6 +9,7 @@ from . import (
     resources,
     sampling,
     dataset,
+    memory,
 
     Client,
     Server,
