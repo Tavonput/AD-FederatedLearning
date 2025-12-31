@@ -23,7 +23,7 @@ class Strategy(ABC):
 
     A Strategy is responsible for computing the parameters for the next global step. It is also responsible for
     maintaining the global round. Usually, it would make more sense for the server to manage the global round, but
-    different aggregation algorithms (specifically the buffered ones) maintain the global round differently.
+    different aggregation algorithms (specifically the buffered ones) process the global round differently.
     """
     @abstractmethod
     def get_comm_type(self) -> CommType:
@@ -33,7 +33,7 @@ class Strategy(ABC):
 
     @abstractmethod
     def get_round(self) -> int:
-        """Get the round."""
+        """Get the round. Round is the current global update iteration."""
         pass
 
 

@@ -24,7 +24,7 @@ class Simple(Strategy):
 
         self.sync_finished_clients: List[int] = []
 
-        self.round = 1
+        self.round = 0
 
 
     def get_comm_type(self) -> CommType:

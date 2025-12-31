@@ -16,11 +16,11 @@ from .messages import EvalMessage
 from .memory import MEMRAY_PATH, MEMRAY_RECORD
 
 
-AccuracyDict = Dict[int, List[Accuracy]]
+type AccuracyDict = Dict[int, List[Accuracy]]
 
 
-# @ray.remote(num_cpus=NUM_CPUS, num_gpus=NUM_GPUS)
-@ray.remote(num_cpus=NUM_CPUS)
+# @ray.remote(num_cpus=NUM_CPUS)
+@ray.remote(num_cpus=NUM_CPUS, num_gpus=NUM_GPUS)
 class EvalActor:
     """Eval Actor.
 
@@ -47,6 +47,8 @@ class EvalActor:
 
         self.accuracies: AccuracyDict = defaultdict(list)
 
+        self.evals_completed = 0
+
         self.ready = False
         self.stop_flag = False
 
@@ -70,6 +72,11 @@ class EvalActor:
     def get_client_accuracies(self, client_id: int) -> List[Accuracy]:
         """Get the accuracy record for a given client."""
         return self.accuracies[client_id]
+
+
+    def get_num_evals_completed(self) -> int:
+        """Get the number of evaluations completed."""
+        return self.evals_completed
 
 
     def evaluate(self, message: EvalMessage) -> None:
@@ -97,6 +104,7 @@ class EvalActor:
         self._add_accuracy(message.client_id, accuracy, message.g_time)
 
         self.log.debug(f"Finished eval for client {message.client_id}: {accuracy:.2f}")
+        self.evals_completed += 1
 
 
     def _add_accuracy(self, c_id: int, accuracy: float, g_time: float) -> None:
@@ -111,7 +119,7 @@ class EvalActor:
 
 
 class EvalActorProxy:
-    """ Eval Actor Proxy.
+    """Eval Actor Proxy.
 
     Wrapper for interacting with a ray EvalActor.
     """
@@ -150,6 +158,11 @@ class EvalActorProxy:
             return ray.get(self._actor.get_client_accuracies.remote(client_id))  # type: ignore
         else:
             return self._actor.get_client_accuracies.remote(client_id)  # type: ignore
+
+
+    def get_num_evals_completed(self) -> int:
+        """Get the number of evaluations completed."""
+        return ray.get(self._actor.get_num_evals_completed.remote())  # type: ignore
 
 
     def evaluate(self, message: EvalMessage) -> ray.ObjectRef:

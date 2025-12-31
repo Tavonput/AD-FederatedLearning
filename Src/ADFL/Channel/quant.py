@@ -59,16 +59,16 @@ class SLQChannel(Channel):
 
 
     def _send(self, params: Parameters) -> Tuple[CompressedParameters, float]:
-        s_time = time.time()
+        s_time = time.perf_counter()
         q_params = self._quantize_params(params, self.bits)
-        return q_params, time.time() - s_time
+        return q_params, time.perf_counter() - s_time
 
 
     def _receive(self, c_params: CompressedParameters) -> Tuple[Parameters, float]:
         assert isinstance(c_params, QuantParameters)
-        s_time = time.time()
+        s_time = time.perf_counter()
         params = {name: self._dequantize_tensor(c_param) for name, c_param in c_params.params.items()}
-        return params, time.time() - s_time
+        return params, time.perf_counter() - s_time
 
 
     def _quantize_params(self, params: Parameters, bits: int) -> QuantParameters:
@@ -76,10 +76,8 @@ class SLQChannel(Channel):
         q_params = QuantParameters({}, 0)
         for name, param in params.items():
             if param.ndim > 1:
-                print(f"[W] {name}")
                 q_param, scale = self._quantize_tensor(param, bits)
             else:
-                print(f"[B] {name}")
                 q_param, scale = param, 1
 
             q_params.params[name] = QuantParameter(
@@ -187,16 +185,16 @@ class QSGDChannel(Channel):
 
 
     def _send(self, params: Parameters) -> Tuple[CompressedParameters, float]:
-        s_time = time.time()
+        s_time = time.perf_counter()
         q_params = self._quantize_params(params, self.bits)
-        return q_params, time.time() - s_time
+        return q_params, time.perf_counter() - s_time
 
 
     def _receive(self, c_params: CompressedParameters) -> Tuple[Parameters, float]:
         assert isinstance(c_params, QuantParameters)
-        s_time = time.time()
+        s_time = time.perf_counter()
         params = {name: self._dequantize_tensor(c_param) for name, c_param in c_params.params.items()}
-        return params, time.time() - s_time
+        return params, time.perf_counter() - s_time
 
 
     def _quantize_params(self, params: Parameters, bits: int) -> QuantParameters:
@@ -327,16 +325,16 @@ class RQSGDChannel(Channel):
 
 
     def _send(self, params: Parameters) -> Tuple[CompressedParameters, float]:
-        s_time = time.time()
+        s_time = time.perf_counter()
         q_params = self._quantize_params(params, self.bits)
-        return q_params, time.time() - s_time
+        return q_params, time.perf_counter() - s_time
 
 
     def _receive(self, c_params: CompressedParameters) -> Tuple[Parameters, float]:
         assert isinstance(c_params, QuantParameters)
-        s_time = time.time()
+        s_time = time.perf_counter()
         params = {name: self._dequantize_tensor(c_param) for name, c_param in c_params.params.items()}
-        return params, time.time() - s_time
+        return params, time.perf_counter() - s_time
 
 
     def _quantize_params(self, params: Parameters, bits: int) -> QuantParameters:
@@ -473,16 +471,16 @@ class CNATChannel(Channel):
 
 
     def _send(self, params: Parameters) -> Tuple[CompressedParameters, float]:
-        s_time = time.time()
+        s_time = time.perf_counter()
         q_params = self._quantize_params(params, self.bits)
-        return q_params, time.time() - s_time
+        return q_params, time.perf_counter() - s_time
 
 
     def _receive(self, c_params: CompressedParameters) -> Tuple[Parameters, float]:
         assert isinstance(c_params, QuantParameters)
-        s_time = time.time()
+        s_time = time.perf_counter()
         params = {name: self._dequantize_tensor(c_param) for name, c_param in c_params.params.items()}
-        return params, time.time() - s_time
+        return params, time.perf_counter() - s_time
 
 
     def _quantize_params(self, params: Parameters, bits: int) -> QuantParameters:

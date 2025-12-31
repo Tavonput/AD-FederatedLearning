@@ -2,6 +2,7 @@ from . import common, Tests
 
 # from .sync import SyncDriver
 from .async_sc import AsyncDriver
+from .qafel import QAFeLDriver
 # from .async_peer import AsyncPeerDriver, AsyncPeerDriverV2
 # from .async_hybrid import AsyncHybridDriver
 

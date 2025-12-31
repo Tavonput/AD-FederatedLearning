@@ -1,12 +1,12 @@
 import json
 import os
-from typing import Dict, TypeAlias, List, Any, Literal, Tuple
+from typing import Dict, TypeAlias, List, Any, Literal, Tuple, Optional
 
 import numpy as np
 
 from ADFL.types import (
     ClientResults, RoundResults, TrainResults, FederatedResults,
-    Accuracy, TrainingConfig, EvalConfig, ScalarPair
+    Accuracy, TrainingConfig, EvalConfig, ScalarPair, AsyncClientWorkerResults
 )
 
 
@@ -22,6 +22,7 @@ t_eval_config: TypeAlias = Dict[str, Any]
 t_train_results: TypeAlias = Dict[str, Any]
 t_round_results: TypeAlias = Dict[str, Any]
 t_client_result: TypeAlias = Dict[str, Any]
+t_trainer_result: TypeAlias = Dict[str, Any]
 
 
 class FederatedResultsExplorer:
@@ -40,6 +41,7 @@ class FederatedResultsExplorer:
 
         self.fr.paradigm = data["paradigm"]
         self.fr.g_start_time = data["g_start_time"]
+        self.fr.g_end_time = self._get(data, "g_end_time")
         self.fr.total_g_rounds = self._get(data, "total_g_rounds")
         self.fr.q_errors_mse = self._get(data, "q_errors_mse")
         self.fr.q_errors_cos = self._get(data, "q_errors_cos")
@@ -48,6 +50,7 @@ class FederatedResultsExplorer:
         self._set_train_config(data)
         self._set_eval_config(data)
         self._set_client_results(data)
+        self._set_trainer_results(data)
 
 
     def get_time_to_target_accuracy(self, target_accuracy: float) -> float:
@@ -64,6 +67,8 @@ class FederatedResultsExplorer:
     def get_central_accuracies_final(self, window: int, method: Literal["mean", "median"]) -> Tuple[float, float]:
         """Get the final central accuracy with the std."""
         central_accuracies = self.get_central_accuracies_raw()
+        if len(central_accuracies) == 0:
+            return (0.0, 0.0)
 
         latest_time = central_accuracies[-1][0]
         recent_accuracies: List[float] = []
@@ -197,6 +202,16 @@ class FederatedResultsExplorer:
             )
 
 
+    def get_total_train_time(self) -> float:
+        """Get the total training time."""
+        return self.fr.g_end_time - self.fr.g_start_time
+
+
+    def get_average_client_uptime(self) -> float:
+        """Get the average client uptime."""
+        return np.mean([r.uptime for r in self.fr.trainer_results]).item()
+
+
     def _set_train_config(self, data: Dict) -> None:
         d_train_config: t_train_config = data["train_config"]
 
@@ -310,3 +325,22 @@ class FederatedResultsExplorer:
         else:
             print(f"{self.filepath}: Failed to get key={key}")
             return default
+
+    def _set_trainer_results(self, data):
+        d_trainer_results: Optional[List[t_trainer_result]] = self._get(data, "trainer_results")
+        if d_trainer_results is None:
+            return
+
+        for d_trainer_result in d_trainer_results:
+            g = lambda x: self._get(d_trainer_result, x)
+
+            self.fr.trainer_results.append(AsyncClientWorkerResults(
+                worker_id=g("worker_id"),
+                fetch_times=g("fetch_times"),
+                fetch_mean=g("fetch_mean"),
+                fetch_std=g("fetch_std"),
+                fetch_min=g("fetch_min"),
+                fetch_max=g("fetch_max"),
+                uptime=g("uptime"),
+            ))
+

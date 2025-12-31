@@ -78,18 +78,7 @@ def evaluate(
     return num_correct / num_samples * 100
 
 
-def diff_parameters(params_a: Parameters, params_b: Parameters) -> Parameters:
-    assert set(params_a.keys()) == set(params_b.keys())
-
-    diff: Parameters = {}
-    with torch.no_grad():
-        for key in params_a:
-            diff[key] = params_b[key] - params_a[key]
-
-    return diff
-
-
 # Just stuff for type hinting I guess
-class AsyncServer:
-    # Defined in ADFL/server.py
+class ServerProxy:
+    # Defined in ADFL/Server/proxy.py
     pass

@@ -34,27 +34,43 @@ def test():
         num_actors = 1,
         client_map = None
     )
+    delay = TrainingConfig.Delay(
+         compute_sigma = None,
+    )
+    metrics = TrainingConfig.Metrics(
+        staleness  = False,
+        q_error    = False,
+        model_dist = False,
+        fetch_raw  = False,
+        fetch_freq = 1,
+    )
+    channel = SLQChannel(8)
+    # channel = IdentityChannel(True)
 
-    delay = TrainingConfig.Delay()
+    strategy = FedBuff(max_buffer_size=2, lr=1, apply_staleness=True)
+    # strategy = Simple(CommType.NORMAL, sync=True)
 
     train_config = TrainingConfig(
-        strategy        = Simple(CommType.NORMAL, sync=True),
-        channel         = IdentityChannel(no_compute_time=True),
-        dataset         = TrainingConfig.Dataset.MNIST,
-        train_file      = "../Data/sent140_small/train.pt",
-        test_file       = "../Data/sent140_small/test.pt",
-        iid             = True,
-        dirichlet_a     = 0.3,
-        model           = "mobile_net_v3_small",
-        num_rounds      = 100,
-        num_epochs      = 1,
-        num_clients     = 200,
-        num_cur_clients = 2,
-        num_servers     = 1,
-        batch_size      = 32,
-        max_rounds      = 1000000,  # Not used anymore (needs to be refactored out)
-        timeout         = 7200,
-        delay           = delay,
+        strategy         = strategy,
+        channel          = channel,
+        dataset          = TrainingConfig.Dataset.MNIST,
+        data_dir         = "../Data",
+        train_file       = "../Data/sent140_small/train.pt",
+        test_file        = "../Data/sent140_small/test.pt",
+        iid              = True,
+        dirichlet_a      = 0.3,
+        model            = "mobile_net_v3_small",
+        num_rounds       = 4,
+        num_epochs       = 1,
+        num_clients      = 10,
+        num_cur_clients  = 2,
+        num_servers      = 1,
+        batch_size       = 32,
+        max_rounds       = 1000000,  # Not used anymore (needs to be refactored out)
+        timeout          = 7200,
+        delay            = delay,
+        num_client_pools = 2,
+        metrics          = metrics,
     )
 
     torch.manual_seed(0)
@@ -62,7 +78,186 @@ def test():
     random.seed(0)
 
     results_path = f"{results_base_path}/test.json"
+    driver = QAFeLDriver(timeline_path, tmp_path, results_path)
+    run_driver(driver, train_config, eval_config)
+    del driver
+
+
+def fetching():
+    results_base_path = "../Output/Results/Kamiak/Engine/Sync"
+    tmp_path = TMP_PATH
+    timeline_path = "../Output/Timelines/test.json"
+
+    eval_config = EvalConfig(
+        method     = "round",
+        central    = True,
+        threshold  = 1000,
+        num_actors = 1,
+        client_map = None
+    )
+    delay = TrainingConfig.Delay(
+         compute_sigma = None,
+    )
+    metrics = TrainingConfig.Metrics(
+        staleness  = False,
+        q_error    = False,
+        model_dist = False,
+        fetch_raw  = False,
+        fetch_freq = 1,
+    )
+
+    channel = IdentityChannel(True)
+    strategy = Simple(CommType.NORMAL, sync=True)
+
+    train_config = TrainingConfig(
+        strategy         = strategy,
+        channel          = channel,
+        dataset          = TrainingConfig.Dataset.MNIST,
+        data_dir         = "../Data",
+        train_file       = "../Data/sent140_small/train.pt",
+        test_file        = "../Data/sent140_small/test.pt",
+        iid              = True,
+        dirichlet_a      = 0.3,
+        model            = "mobile_net_v3_small",
+        num_rounds       = 100,
+        num_epochs       = 1,
+        num_clients      = 100,
+        num_cur_clients  = 20,
+        num_servers      = 1,
+        batch_size       = 32,
+        max_rounds       = 1000000,  # Not used anymore (needs to be refactored out)
+        timeout          = 7200,
+        delay            = delay,
+        num_client_pools = 2,
+        metrics          = metrics,
+    )
+
+    torch.manual_seed(0)
+    numpy.random.seed(0)
+    random.seed(0)
+
+    results_path = f"{results_base_path}/2.json"
     driver = AsyncDriver(timeline_path, tmp_path, results_path, traditional=True)
+    run_driver(driver, train_config, eval_config)
+    del driver
+
+
+def eval_throughput():
+    results_base_path = "../Output/Results/Kamiak/Engine/Eval/Sync"
+    tmp_path = TMP_PATH
+    timeline_path = "../Output/Timelines/test.json"
+
+    eval_config = EvalConfig(
+        method     = "round",
+        central    = False,
+        threshold  = 1,
+        num_actors = 2,
+        client_map = None
+    )
+    delay = TrainingConfig.Delay(
+         compute_sigma = None,
+    )
+    metrics = TrainingConfig.Metrics(
+        staleness  = False,
+        q_error    = False,
+        model_dist = False,
+        fetch_raw  = False,
+        fetch_freq = 1,
+    )
+
+    channel = IdentityChannel(True)
+    strategy = Simple(CommType.NORMAL, sync=True)
+
+    train_config = TrainingConfig(
+        strategy         = strategy,
+        channel          = channel,
+        dataset          = TrainingConfig.Dataset.MNIST,
+        data_dir         = "../Data",
+        train_file       = "../Data/sent140_small/train.pt",
+        test_file        = "../Data/sent140_small/test.pt",
+        iid              = True,
+        dirichlet_a      = 0.3,
+        model            = "mobile_net_v3_small",
+        num_rounds       = 2,
+        num_epochs       = 1,
+        num_clients      = 100,
+        num_cur_clients  = 10,
+        num_servers      = 1,
+        batch_size       = 32,
+        max_rounds       = 1000000,  # Not used anymore (needs to be refactored out)
+        timeout          = 7200,
+        delay            = delay,
+        num_client_pools = 2,
+        metrics          = metrics,
+    )
+
+    torch.manual_seed(0)
+    numpy.random.seed(0)
+    random.seed(0)
+
+    results_path = f"{results_base_path}/client_self.json"
+    driver = AsyncDriver(timeline_path, tmp_path, results_path, traditional=True)
+    run_driver(driver, train_config, eval_config)
+    del driver
+
+
+def qafel_test():
+    results_base_path = "../Output/Results/Kamiak/Bi/"
+    tmp_path = TMP_PATH
+    timeline_path = "../Output/Timelines/test.json"
+
+    eval_config = EvalConfig(
+        method     = "round",
+        central    = True,
+        threshold  = 2,
+        num_actors = 1,
+        client_map = None
+    )
+    delay = TrainingConfig.Delay(
+         server_mbps   = 30,
+         compute_sigma = 4,
+         network_sigma = 8,
+         network_shift = 10,
+    )
+    metrics = TrainingConfig.Metrics(
+        staleness  = False,
+        q_error    = False,
+        model_dist = False,
+        fetch_raw  = False,
+        fetch_freq = 1,
+    )
+    channel = QSGDChannel(8)
+    strategy = FedBuff(max_buffer_size=10, lr=1, apply_staleness=True)
+
+    train_config = TrainingConfig(
+        strategy         = strategy,
+        channel          = channel,
+        dataset          = TrainingConfig.Dataset.MNIST,
+        data_dir         = "../Data",
+        train_file       = "../Data/sent140_small/train.pt",
+        test_file        = "../Data/sent140_small/test.pt",
+        iid              = True,
+        dirichlet_a      = 0.3,
+        model            = "mobile_net_v3_small",
+        num_rounds       = 100,
+        num_epochs       = 1,
+        num_clients      = 100,
+        num_cur_clients  = 10,
+        num_servers      = 1,
+        batch_size       = 32,
+        max_rounds       = 1000000,  # Not used anymore (needs to be refactored out)
+        timeout          = 7200,
+        delay            = delay,
+        num_client_pools = 2,
+        metrics          = metrics,
+    )
+
+    torch.manual_seed(0)
+    numpy.random.seed(0)
+    random.seed(0)
+
+    results_path = f"{results_base_path}/qafel_nonbroadcast.json"
+    driver = QAFeLDriver(timeline_path, tmp_path, results_path)
     run_driver(driver, train_config, eval_config)
     del driver
 
@@ -369,8 +564,7 @@ def bandwidth_model_size_comp():
 
 def main() -> None:
     init_logging()
-    # param_vs_delay()
-    test()
+    eval_throughput()
 
 if __name__ == "__main__":
     main()

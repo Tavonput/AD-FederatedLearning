@@ -25,7 +25,7 @@ class FedBuff(Strategy):
         self.client_working_status: List[bool] = []
         self.finished_clients: List[int] = []
 
-        self.round = 1
+        self.round = 0
 
         # See paper
         self.a = 0.5
@@ -71,12 +71,13 @@ class FedBuff(Strategy):
 
         if self.apply_staleness:
             for tensor in c_update.values():
+                # This will not affect the integer tensors
                 tensor.float().mul_(self._staleness_factor(agg_info.staleness))
 
         if self.buffer_size == 0:
             self.buffer = c_update
         else:
-            add_parameters_inpace(self.buffer, c_update, 1.0, 1.0, to_float=True)
+            add_parameters_inpace(self.buffer, c_update, 1, 1, to_float=False)
 
         self.buffer_size += 1
         if self.buffer_size >= self.max_buffer_size:
@@ -85,6 +86,7 @@ class FedBuff(Strategy):
             self.finished_clients.clear()
 
             for tensor in self.buffer.values():
+                # This will not affect the integer tensors
                 tensor.float().div_(self.max_buffer_size)
 
             params_prime = add_parameters(agg_info.g_params, self.buffer, 1.0, self.lr)

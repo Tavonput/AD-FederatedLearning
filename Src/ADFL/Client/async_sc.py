@@ -1,7 +1,7 @@
 import time
 from copy import deepcopy
 from typing import List, Union, Tuple, Callable, Optional, Any
-from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -16,19 +16,186 @@ from ADFL.messages import AsyncClientTrainMessage, ClientUpdateMessage, EvalMess
 from ADFL.eval import EvalActorProxy
 from ADFL.model import (
     Parameters, get_model_parameters, parameter_mean_var, set_model_parameters, parameter_relative_mse,
-    parameter_mse, parameter_cosine_similarity
+    parameter_mse, parameter_cosine_similarity, diff_parameters
 )
 from ADFL.Channel import Channel
 from ADFL.Strategy.base import Strategy, CommType
 
-from .common import LR, train_epoch, evaluate, AsyncServer, diff_parameters
+from .common import LR, train_epoch, evaluate, ServerProxy
 
 
-MEASURE_QERROR = False
-MEASURE_MODEL_DIST = False
+class AsyncClientV2:
+    """Async Client V2
+
+    In contrast to AsyncClient, this version does not maintain training objects locally (model, optimizer). Training
+    objects are passed in by the caller.
+
+    TODO:
+    - Dataloaders are still stored in this class. Is this a problem? Might want to look into how passing dataloaders
+      to actors work and if there is a better way of accessing this data.
+    - Send in logger from worker.
+    """
+    def __init__(
+        self,
+        client_id:        int,
+        train_loader:     DataLoader,
+        test_loader:      DataLoader,
+        compute_delay:    float,
+        network_delay:    float,
+        server:           "ServerProxy",
+        evaluator:        EvalActorProxy,
+    ):
+        self.log = my_logging.get_logger(f"CLIENT {client_id}")
+
+        self.client_id = client_id
+        self.server = server
+        self.evaluator = evaluator
+
+        self.train_loader = train_loader
+        self.test_loader = test_loader
+
+        self.compute_delay = compute_delay
+        self.network_delay = network_delay
+
+        self.global_start = time.time()
+        self.last_eval_interval = -1
+        self.round = 0
+        self.g_model_step = 0
+
+        self.accuracies: List[Accuracy] = []
+
+
+    def get_accuracies(self) -> List[Accuracy]:
+        """Get the accuracies."""
+        if self.evaluator is None:
+            return self.accuracies
+
+        accuracies = self.evaluator.get_client_accuracies(self.client_id, block=True)
+        assert isinstance(accuracies, List)
+        return accuracies
+
+
+    def train(
+        self,
+        model:        nn.Module,
+        device:       torch._C.device,
+        train_config: TrainingConfig,
+        eval_config:  EvalConfig,
+        epochs:       int,
+    ) -> Tuple[Parameters, RoundResults]:
+        """Message: Train a federated learning round."""
+        # self.optimizer = AdamW(self.model.parameters(), lr=LR)
+        optimizer = SGD(model.parameters(), lr=LR, weight_decay=0.001)
+        criterion = nn.CrossEntropyLoss()
+
+        self.round += 1
+        self.log.debug(f"Starting training round {self.round}")
+
+        round_results = RoundResults()
+        round_results.epochs = epochs
+        round_results.train_round = self.round
+
+        assert train_config.strategy is not None
+        comm_type = train_config.strategy.get_comm_type()
+
+        if comm_type == CommType.NORMAL:
+            round_results.train_results, parameters_prime = self._train_normal(
+                model, optimizer, criterion, device, epochs
+            )
+
+        elif comm_type == CommType.DELTA:
+            params_prev = get_model_parameters(model)
+
+            round_results.train_results, parameters_prime = self._train_normal(
+                model, optimizer, criterion, device, epochs
+            )
+            round_results.mse = parameter_mse(params_prev, parameters_prime, exclude_bias=False)
+
+            parameters_prime = diff_parameters(params_prev, parameters_prime)
+        else:
+            assert False, f"Encountered an invalid CommType"
+
+        round_results.accuracy, round_results.sent_eval_req = self._possibly_eval(model, device, eval_config)
+
+        return parameters_prime, round_results
+
+
+    def _train_normal(
+        self, model: nn.Module, optimizer: Optimizer, criterion: nn.Module, device: torch._C.device, epochs: int
+    ) -> Tuple[List[TrainResults], Parameters]:
+        results: List[TrainResults] = []
+
+        for epoch in range(epochs):
+            self.log.debug(f"Epoch {epoch + 1}/{epochs}")
+            epoch_results = train_epoch(model, optimizer, criterion, self.train_loader, device)
+            results.append(epoch_results)
+
+        return results, get_model_parameters(model)
+
+
+    def _possibly_eval(
+        self, model: nn.Module, device: torch._C.device, eval_config: EvalConfig
+    ) -> Tuple[Optional[Accuracy], bool]:
+        """Evaluate if needed or send the job to an evaluator. Returns (accuracy, sent_to_evaluator)."""
+        if self._need_to_eval(eval_config.method, eval_config.threshold) is False or eval_config.central is True:
+            return None, False
+
+        if self.evaluator is None:
+            return (
+                self._self_eval(model, eval_config.method, eval_config.threshold, device),
+                False,
+            )
+        else:
+            self._send_eval_message(model)
+            return None, True
+
+
+    def _need_to_eval(self, method: str, threshold: float) -> bool:
+        """Check if we need to eval."""
+        if method == "time":
+            current_eval_interval = (time.time() - self.global_start) // threshold
+            return (current_eval_interval > self.last_eval_interval)
+
+        elif method == "round":
+            return (self.round % threshold == 0)
+
+        else:
+            assert False, "This should not happen"
+
+
+    def _self_eval(self, model: nn.Module, method: str, threshold: float, device: torch._C.device) -> Accuracy:
+        """Perform a self evaluation if needed."""
+        accuracy = 0
+
+        if method == "time":
+            current_eval_interval = (time.time() - self.global_start) // threshold
+            self.log.debug(f"Evaluating interval: {current_eval_interval}")
+            self.last_eval_interval = current_eval_interval
+
+        elif method == "round":
+            self.log.debug(f"Evaluating round: {self.round}")
+
+        accuracy = evaluate(model, self.test_loader, device)
+        return Accuracy(accuracy, time.time())
+
+
+    def _send_eval_message(self, model: nn.Module) -> None:
+        """Send an evaluation message to the evaluator if needed."""
+        self.log.debug("Sending evaluation request.")
+
+        message = EvalMessage(
+            parameters=get_model_parameters(model),
+            client_id=self.client_id,
+            g_time=time.time(),
+        )
+        self.evaluator.evaluate(message)
 
 
 class AsyncClient:
+    """Async Client
+
+    Deprecated. Asynchronous client that trains a given model and sends the server an update.
+    """
     def __init__(
         self,
         client_id:     int,
@@ -39,11 +206,12 @@ class AsyncClient:
         network_delay: float,
         train_config:  TrainingConfig,
         eval_config:   EvalConfig,
-        server:        "AsyncServer",
+        server:        "ServerProxy",
         evaluator:     EvalActorProxy,
     ):
         self.log = my_logging.get_logger(f"CLIENT {client_id}")
-        self.log.debug("Initializing")
+
+        self.log.warning("AsyncClient is deprecated. Please use AsyncClientV2")
 
         self.device: torch._C.device = torch.device("cpu")
 
@@ -130,6 +298,7 @@ class AsyncClient:
         # self.optimizer = AdamW(self.model.parameters(), lr=LR)
 
         # Simulate parameter transfer across the communication channel
+        assert msg.parameters is not None
         params, d_time = self.channel.on_client_receive(msg.parameters)
         set_model_parameters(self.model, params)
 
@@ -218,12 +387,12 @@ class AsyncClient:
         round_results.network_time = network_delay
         round_results.round_time = time.time() - round_results.g_start_time
 
-        if MEASURE_QERROR:
+        if self.train_config.metrics.q_error:
             d_params, _ = self.channel.on_server_receive(c_params)
             round_results.q_error_mse = parameter_relative_mse(parameters, d_params, exclude_bias=True)
             round_results.q_error_cos = parameter_cosine_similarity(parameters, d_params, exclude_bias=True)
 
-        if MEASURE_MODEL_DIST:
+        if self.train_config.metrics.model_dist:
             round_results.model_dist = parameter_mean_var(parameters, exclude_bias=True)
 
         update = ClientUpdateMessage(
@@ -234,7 +403,7 @@ class AsyncClient:
             num_examples  = len(self.train_loader.dataset),  # type: ignore
         )
 
-        self.server.client_update.remote(update)  # type: ignore
+        self.server.client_update(update)  # type: ignore
 
 
     def _possibly_eval(self) -> None:
@@ -332,7 +501,7 @@ class AsyncClientProxy:
         slowness:     float,
         train_config: TrainingConfig,
         eval_config:  EvalConfig,
-        server:       "AsyncServer",
+        server:       "AsyncServer",  # type: ignore
         evaluator:    EvalActorProxy,
     ):
         self.actor: Any = None

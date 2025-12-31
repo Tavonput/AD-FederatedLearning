@@ -1,4 +1,4 @@
-from typing import Tuple, List, Union, Optional, Dict
+from typing import Tuple, List, Union, Optional, Dict, Callable
 from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
@@ -29,9 +29,9 @@ class PlotConfig:
         if self.tight_layout:
             fig.tight_layout()
 
-        ax.set_title(self.title)
-        ax.set_xlabel(self.xlabel)
-        ax.set_ylabel(self.ylabel)
+        ax.set_title(self.title, fontweight="bold")
+        ax.set_xlabel(self.xlabel, fontweight="bold")
+        ax.set_ylabel(self.ylabel, fontweight="bold")
 
         ax.set_axisbelow(True)
 
@@ -90,12 +90,13 @@ def plot_line(
     x:          List[ScalarList],
     y:          List[ScalarList],
     config:     PlotConfig,
-    errors:     Optional[List[ScalarList]]    = None,
-    linestyles: Optional[List[str]]           = None,
-    markers:    Optional[List[Optional[str]]] = None,
-    labels:     Optional[List[Optional[str]]] = None,
-    show:       bool                          = True,
-    save_path:  Optional[str]                 = None,
+    errors:     Optional[List[ScalarList]]       = None,
+    linestyles: Optional[List[str]]              = None,
+    markers:    Optional[List[Optional[str]]]    = None,
+    labels:     Optional[List[Optional[str]]]    = None,
+    show:       bool                             = True,
+    save_path:  Optional[str]                    = None,
+    callback:   Optional[Callable[[Axes], None]] = None
 ) -> Tuple[Figure, Axes]:
     """Create a line plot with multiple lines.
 
@@ -142,6 +143,9 @@ def plot_line(
 
     if any(label is not None for label in labels):
         ax.legend()
+
+    if callback is not None:
+        callback(ax)
 
     save_and_show(save_path, show)
     return fig, ax
@@ -221,7 +225,7 @@ def show_plot() -> None:
 def set_global_rcparams() -> None:
     """Set the global plt.rcParams for a professional look."""
     plt.rcParams["font.family"] = "serif"
-    # plt.rcParams["font.weight"] = "bold"
+    plt.rcParams["font.weight"] = "bold"
     plt.rcParams["figure.dpi"] = 300
     plt.rcParams["lines.linewidth"] = 1.5
     plt.rcParams["lines.markersize"] = 6

@@ -49,6 +49,13 @@ class NumpyDataset(Dataset):
         return data, label
 
 
+    def create_data_copies(self) -> None:
+        self.data = self.data.copy()
+        self.data.setflags(write=True)
+        self.labels = self.data.copy()
+        self.labels.setflags(write=True)
+
+
 class NumpyTokenizedDataset(Dataset):
     """Numpy Tokenized Dataset
 

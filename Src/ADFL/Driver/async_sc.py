@@ -8,20 +8,19 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from ADFL import my_logging
-from ADFL.types import TrainingConfig, FederatedResults, ClientResults, EvalConfig, Accuracy
+from ADFL.types import TrainingConfig, FederatedResults, EvalConfig, AsyncServerResults
 from ADFL.model import Parameters
 from ADFL.eval import EvalActorProxy
 from ADFL.flag import RemoteFlag
 from ADFL.dataset import DatasetSplit
-from ADFL.Client import AsyncClient, AsyncClientWorkerProxy
-from ADFL.Server import AsyncServer, TraditionalServer
+from ADFL.Client import AsyncClientV2, AsyncClientWorkerProxy, DistributedClientPool
+from ADFL.Server import ServerType, ServerProxy
 
 from .common import (
     Driver, check_strategy, init_ray, get_delay_map, check_eval_config, create_datasets, generate_model,
     federated_results_to_json
 )
 
-AsyncServerU = Union[AsyncServer, TraditionalServer]
 
 POLL_INT = 1
 
@@ -29,10 +28,15 @@ POLL_INT = 1
 class AsyncDriver(Driver):
     """Asynchronous Server-Client Driver.
 
-    TODO: Explanation of how this thing works.
+    Initializes all resources and actors. Makes the call to start the server. Establishes a stop flag between the server
+    and periodically polls it to see if the server is done, otherwise the driver the send a stop request to the server
+    upon timeout.
+
+    The driver does not own the clients. The driver will create the clients and push them to client pools actors. The
+    driver does maintain all actor references.
     """
     def __init__(
-        self, 
+        self,
         timeline_path: str = None,  # type: ignore
         tmp_path: str = None,  # type: ignore
         results_path: str = "./results.json", 
@@ -43,19 +47,25 @@ class AsyncDriver(Driver):
         self.timeline_path = timeline_path
         self.tmp_path = tmp_path
         self.results_path = results_path
+
         self.use_traditional = traditional
+        if self.use_traditional:
+            self.server_type = ServerType.TRADITIONAL
+        else:
+            self.server_type = ServerType.ASYNC
 
         self.train_config: TrainingConfig = None  # type: ignore
         self.eval_config: EvalConfig = None  # type: ignore
 
-        self.server: AsyncServerU = None  # type: ignore
-        self.clients: List[AsyncClient] = []
+        self.server: ServerProxy = None  # type: ignore
+        self.client_pool: DistributedClientPool = None  # type: ignore
         self.workers: List[AsyncClientWorkerProxy] = []
         self.evaluators: List[EvalActorProxy] = []
 
         self.dataset: DatasetSplit = None  # type: ignore
 
         self.stop_flag: RemoteFlag = None  # type: ignore
+
 
     def init_backend(self) -> None:
         self.log.info("Initializing ray backend")
@@ -87,36 +97,33 @@ class AsyncDriver(Driver):
         self.dataset = self._init_datasets()
         self.evaluators = self._init_evaluators()
         self.server = self._init_server()
-        self.clients = self._init_clients()
+        self.client_pool = self._init_clients()
         self.workers = self._init_workers()
 
-        ray.get(self.server.add_clients.remote(self.clients))
-        ray.get(self.server.add_workers.remote(self.workers))
+        self.server.add_workers(self.workers, block=True)
+        self.server.attach_client_pool(self.client_pool)
 
 
     def run(self) -> None:
         self.log.info("Initiating training")
 
         start_time = time.time()
-        self.server.run.remote()
+        self.server.run()
 
         server_finished = self.stop_flag.poll(self.train_config.timeout, POLL_INT)
         if server_finished:
             self.log.info("Server has finished all jobs")
         else:
             self.log.info("Timeout reached. Stopping server")
-            ray.get(self.server.stop.remote())
+            self.server.stop(block=True)
 
-        self.log.info("Stopping evaluators")
-        [e.stop(block=True) for e in self.evaluators]
+        self._stop_evaluators()
 
-        server_accuracies = self._get_server_accuracies()
-        client_results: List[ClientResults] = ray.get(self.server.get_client_results.remote())
-        self._build_and_savefederated_results(client_results, server_accuracies, start_time)
+        server_results: AsyncServerResults = self.server.get_results(block=True)
+        self._build_and_savefederated_results(server_results, start_time)
 
-        finished_model = ray.get(self.server.get_model.remote())
         if self.train_config.model_save is not None:
-            torch.save(finished_model, self.train_config.model_save)
+            torch.save(server_results.model, self.train_config.model_save)
             self.log.info(f"Model saved to {self.train_config.model_save}")
 
         if self.timeline_path is not None:
@@ -146,50 +153,46 @@ class AsyncDriver(Driver):
         return dataset_split
 
 
-    def _init_clients(self) -> List[AsyncClient]:
+    def _init_clients(self) -> DistributedClientPool:
         self.log.info(f"Initializing {self.train_config.num_clients} clients")
         assert self.train_config.delay.delay_map is not None
 
-        return [
-            AsyncClient(
+        clients = [
+            AsyncClientV2(
                 client_id     = i,
-                model_fn      = lambda: generate_model(self.train_config.dataset, self.train_config.model),
                 train_loader  = self._create_train_loader(i),
                 test_loader   = self._create_eval_loader() if self.eval_config.num_actors == 0 else None,  # type: ignore
                 compute_delay = self.train_config.delay.delay_map[i][0],  # 0 is compute delay
                 network_delay = self.train_config.delay.delay_map[i][1],  # 1 is network delay
-                train_config  = self.train_config,
-                eval_config   = self.eval_config,
-                server        = self.server,
+                server        = self.server,  # type: ignore
                 evaluator     = self._get_evaluator_for_client(i)  # type: ignore
             )
             for i in range(self.train_config.num_clients)
         ]
 
+        client_pool = DistributedClientPool(
+            self.train_config.num_clients, self.train_config.num_client_pools, self.log
+        )
+        client_pool.init_pools(clients)
 
-    def _init_server(self) -> AsyncServerU: # type: ignore
+        return client_pool
+
+
+    def _init_server(self) -> ServerProxy:
         self.log.info("Initializing server")
 
         evaluator = self.evaluators[0] if self.eval_config.central else None
 
-        if self.use_traditional:
-            server = TraditionalServer.remote(
-                self._get_model_fn(),
-                self.train_config,
-                self.eval_config,
-                evaluator,
-                self.stop_flag,
-            )
-        else:
-            server = AsyncServer.remote(
-                self._get_model_fn(),
-                self.train_config,
-                self.eval_config,
-                evaluator,
-                self.stop_flag,
-            )
+        server = ServerProxy(
+            self.server_type,
+            self._get_model_fn(),
+            self.train_config,
+            self.eval_config,
+            evaluator,
+            self.stop_flag,
+        )
 
-        ray.get(server.initialize.remote())  # type: ignore
+        server.initialize()
         return server
 
 
@@ -217,11 +220,15 @@ class AsyncDriver(Driver):
                 worker_id    = i,
                 train_config = self.train_config,
                 eval_config  = self.eval_config,
+                model_fn     = self._get_model_fn(),
             )
             for i in range(self.train_config.num_cur_clients)
         ]
 
-        [worker.initialize() for worker in workers]
+        for worker in workers:
+            worker.initialize()
+            worker.attach_client_pool(self.client_pool)
+
         return workers
 
 
@@ -249,31 +256,29 @@ class AsyncDriver(Driver):
 
 
     def _build_and_savefederated_results(
-        self, client_results: List[ClientResults],server_accuracies: List[Accuracy], start_time: float
+        self, server_results: AsyncServerResults, start_time: float
     ) -> None:
         """Build and save a FederatedResults."""
+        worker_results = [worker.get_metrics() for worker in self.workers]
+
         federated_results = FederatedResults(
-            paradigm       = ("TraditionalServerClient" if self.use_traditional else "AsyncServerClient"),
-            train_config   = self.train_config,
-            eval_config    = self.eval_config,
-            g_start_time   = start_time,
-            client_results = client_results,
-            c_accuracies   = server_accuracies,
-            total_g_rounds = ray.get(self.server.get_g_rounds.remote()),
-            q_errors_mse   = ray.get(self.server.get_q_errors_mse.remote()),
-            q_errors_cos   = ray.get(self.server.get_q_errors_cos.remote()),
-            model_dists    = ray.get(self.server.get_model_dist.remote()),
+            paradigm        = (ServerType.TRADITIONAL.value if self.use_traditional else ServerType.ASYNC.value),
+            train_config    = self.train_config,
+            eval_config     = self.eval_config,
+            g_start_time    = start_time,
+            g_end_time      = server_results.g_end_time,
+            client_results  = server_results.client_results,
+            c_accuracies    = server_results.accuracies,
+            total_g_rounds  = server_results.g_rounds,
+            q_errors_mse    = server_results.q_errors_mse,
+            q_errors_cos    = server_results.q_errors_cos,
+            model_dists     = server_results.model_dist,
+            trainer_results = worker_results,
+            staleness       = server_results.staleness,
         )
 
         federated_results_to_json(self.results_path, federated_results)
         self.log.info(f"FederatedResults saved to {self.results_path}")
-
-
-    def _get_server_accuracies(self) -> List[Accuracy]:
-        """Get the server accuracies if possible."""
-        if self.eval_config.central == True:
-            return ray.get(self.server.get_accuracies.remote())
-        return []
 
 
     def _check_client_models(self) -> None:
@@ -302,3 +307,24 @@ class AsyncDriver(Driver):
 
             return get_model
 
+
+    def _stop_evaluators(self) -> None:
+        """Pool evaluators until they have completed all evaluation requests."""
+        worker_results = [w.get_metrics() for w in self.workers]
+        num_evals = sum([wr.num_eval_req for wr in worker_results])
+
+        self.log.info("Stopping evaluators...")
+
+        # Poll the evaluators until they are done
+        while True:
+            num_req_completed = sum(
+                [e.get_num_evals_completed() for e in self.evaluators]
+            )
+            self.log.debug(f"Polled evaluators. {num_req_completed}/{num_evals} completed")
+
+            if num_req_completed >= num_evals:
+                break
+
+            time.sleep(POLL_INT)
+
+        [e.stop(block=True) for e in self.evaluators]

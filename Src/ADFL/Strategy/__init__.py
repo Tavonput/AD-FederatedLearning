@@ -1,4 +1,4 @@
-from .base import Strategy
+from .base import Strategy, AggregationInfo
 
 from . import (
     simple,

@@ -1,12 +1,33 @@
-Abstract the async servers by making one async server class, then create an AsyncTrainer and a TraditionalTrainer.
+Dataset movement:
+    Test the current setup. I assume the entire dataset is being transferred during communication.
+    If this is true, try to utilize Ray zero-cost numpy thing. Place the raw numpy data in the object store.
+    Option (1): Have the trainer build the dataloader on the spot. I don't know if this will require a copy of the
+    numpy data. Also, you would need to keep track of shuffling states.
+    Option (2): Have the client pool send the order of indices to train. This would also allow the client pool to
+    manage the shuffling.
+Right now for FedBuff, the num_batches_trained does not get averaged, just summed. Does this make a difference.
+Right now, QAFeLServer is evaluating the global model. Is this different from evaluating the hidden state?
+DO NOT SEND TORCH TENSORS TO ACTORS FOR DATASETS, NUMPY ARRAYS ARE MUCH FASTER. FOR LLM.
 
-QAFeLServer:
+For traditional, put model into object store then pass the ref to all workers (Done needs to be refactored). Does this 
+also work in async?
 
-QAFeLClient:
-    model: nn.Module
-    hidden_state: Parameters
+Implement dataset passing instead of dataloader passing (reproducibility thing). Put dataset in object store before
+sending. Currently takes about 40-50 ms to transfer without ray put. Also you need to wrap the dataset ref in an object
+before sending it, like DatasetRef(ray.put(dataset)), so that the ref stays maintained. Then retest fetching.
 
-    function train():
-        
+Training rounds are off by 1. They start at 0 so there is an extra round processed.
 
-QAFeLClientWorker:
+Get server-self eval going.
+    - GPU setup on server.
+    - Test dataset on server.
+    - Move eval code to model.py if not done so already.
+    - Setup self eval stuff based on the client-side code. Most likely just the same thing, so abstract.
+    - Accuracy should be stored in the same place as usual (with evaluators). I don't remember where that is.
+
+Metrics (CPU Only?):
+    - Throughput. Both client-side and server-side. Test evaluation every round, then every other round...
+    - Server execution times. Orchestration, aggregation, and evaluation. Just collect the total time spent for each
+      task, then partition the times. Create a separate structure for theses metrics, then add that to the results
+      structure. This should make things more organized.
+    - Inline evaluations could warp the staleness distribution? Throttling is a good word for this type of behavior.

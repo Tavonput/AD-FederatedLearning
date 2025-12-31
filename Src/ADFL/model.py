@@ -345,3 +345,17 @@ def add_parameters_inpace(
                 params_a[key].float().mul_(alpha).add_(params_b[key], alpha=beta)
             else:
                 params_a[key].mul_(alpha).add_(params_b[key], alpha=beta)
+
+
+def diff_parameters(params_a: Parameters, params_b: Parameters) -> Parameters:
+    """Return b - a."""
+    assert set(params_a.keys()) == set(params_b.keys())
+
+    diff: Parameters = {}
+    with torch.no_grad():
+        for key in params_a:
+            diff[key] = params_b[key] - params_a[key]
+
+    return diff
+
+

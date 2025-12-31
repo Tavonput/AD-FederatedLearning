@@ -1,5 +1,6 @@
 import os
 import json
+from re import A
 from typing import Union, Any, Tuple, List, Optional
 from enum import Enum
 from dataclasses import asdict
@@ -166,11 +167,22 @@ def check_eval_config(eval_config: EvalConfig, train_config: TrainingConfig) -> 
     if eval_config.num_actors == 0:
         return
 
-    if eval_config.client_map is not None:
-        assert len(eval_config.client_map) == eval_config.num_actors
+    if eval_config.client_map is None:
+        # Create partitions for the client map
+        client_ids = list(range(train_config.num_clients))
+        clients_per_eval = (train_config.num_clients + eval_config.num_actors - 1) // eval_config.num_actors
 
-        all_clients = list(chain.from_iterable(eval_config.client_map))
-        assert len(all_clients) == train_config.num_clients
+        eval_config.client_map = []
+        start = 0
+        while start < train_config.num_clients:
+            end = start + clients_per_eval
+            eval_config.client_map.append(client_ids[start:end])
+            start = end
+
+    assert len(eval_config.client_map) == eval_config.num_actors
+
+    all_clients = list(chain.from_iterable(eval_config.client_map))
+    assert len(all_clients) == train_config.num_clients
 
 
 def check_strategy(system_sync: bool, strategy: Strategy) -> None:

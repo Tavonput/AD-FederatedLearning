@@ -29,7 +29,7 @@ class FedAsync(Strategy):
         self.client_working_status: List[bool] = []
         self.free_clients: List[int] = []
 
-        self.round = 1
+        self.round = 0
 
 
     def get_comm_type(self) -> CommType:
